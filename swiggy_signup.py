@@ -1106,23 +1106,21 @@ def _cancel_worker(provider, order_id, rent_time):
                 if "EARLY_CANCEL_DENIED" in res_str:
                     elapsed = time.time() - rent_time
                     wait_sec = max(2.0, 122.0 - elapsed)
-                    log(f"[Order {order_id}] Early cancel denied -> waiting {int(wait_sec)}s (2-min mark) for guaranteed refund...")
                     time.sleep(wait_sec)
                     for sub_attempt in range(3):
                         res2 = provider.set_status(order_id, 8)
                         res2_str = str(res2.get("_raw", "") if isinstance(res2, dict) else res2).strip()
-                        log(f"[Order {order_id}] 2-minute mark refund result -> {res2_str or res2}")
                         if "EARLY_CANCEL_DENIED" in res2_str:
                             time.sleep(4)
                             continue
+                        log(f"[Background Refund] Order {order_id} -> {res2_str or 'ACCESS_CANCEL'}")
                         break
                     unregister_active_order(order_id)
                     return
-                log("order %s cancelled/refunded -> %s" % (order_id, res_str or res))
+                log(f"[Background Refund] Order {order_id} -> {res_str or 'ACCESS_CANCEL'}")
                 unregister_active_order(order_id)
                 return
-        except Exception as e:
-            log("cancel of %s attempt %d notice: %s" % (order_id, attempt, e))
+        except Exception:
             time.sleep(3)
     unregister_active_order(order_id)
 

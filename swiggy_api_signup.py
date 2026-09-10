@@ -502,10 +502,8 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 status_str = "error"
 
             if registered or status_str != "not_registered":
-                slog("🚫 [PRE-CHECK REJECT] %s status is '%s' (not strictly 'not_registered') -> Cancelling order %s for refund" % (p, status_str, o))
+                slog("🚫 [PRE-CHECK REJECT] %s is '%s' -> Cancelling order %s in background for refund & buying next number immediately..." % (p, status_str, o))
                 ss.cancel_async(provider, o, rent_time=rent_time)
-                if ss.cancel_sleep(2):
-                    return None
                 continue
 
             if ss.is_cancelled():
@@ -516,7 +514,7 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
             sw = uuid.uuid4().hex[:16]
             code, data = send_otp(p, sw)
             if code != 200 or data.get("statusCode") != 0:
-                slog("[%s] sms_otp failed (HTTP %d): %s" % (p, code, str(data)[:120]))
+                slog("[%s] sms_otp failed (HTTP %d): %s -> Cancelling in background & buying next..." % (p, code, str(data)[:120]))
                 ss.cancel_async(provider, o, rent_time=rent_time)
                 continue
 
@@ -529,7 +527,7 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 if ss.is_cancelled():
                     slog("[%s] Cancelled during OTP wait -> cancelling order %s" % (p, o))
                 else:
-                    slog("[%s] ⏰ 2 minutes elapsed with no OTP -> cancelling order %s for refund" % (p, o))
+                    slog("[%s] ⏰ OTP timeout -> Cancelling order %s in background & buying next number..." % (p, o))
                 ss.cancel_async(provider, o, rent_time=rent_time)
                 if ss.is_cancelled():
                     return None
@@ -552,10 +550,8 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
 
                 # Layer 2: Strict Native Check - Reject Existing Accounts!
                 if is_registered:
-                    slog("🚫 [SWIGGY REJECT] %s is an OLD/ALREADY REGISTERED account (registered=True) -> Cancelling order %s for refund!" % (p, o))
+                    slog("🚫 [SWIGGY REJECT] %s is an OLD/ALREADY REGISTERED account -> Cancelling order %s in background & buying next number immediately!" % (p, o))
                     ss.cancel_async(provider, o, rent_time=rent_time)
-                    if ss.cancel_sleep(2):
-                        return None
                     continue
 
                 # Brand New User Confirmed -> Proceed to Signup
