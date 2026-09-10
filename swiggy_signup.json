@@ -1,0 +1,195 @@
+{
+  "device": {
+    "adb_path": "C:\\Users\\ryolo\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Google.PlatformTools_Microsoft.Winget.Source_8wekyb3d8bbwe\\platform-tools\\adb.exe",
+    "serial": "75f8d6e626"
+  },
+  "app": {
+    "package": "in.swiggy.android",
+    "login_activity": "in.swiggy.android/.nux.login.LoginActivityV2",
+    "home_activity": "in.swiggy.android/in.swiggy.android.activities.HomeActivity"
+  },
+  "signup": {
+    "phone": "X",
+    "name": "",
+    "email": "",
+    "refer_code": "",
+    "apply_referral": false,
+    "auto_random": true,
+    "otp_source": "provider",
+    "otp": "",
+    "otp_timeout_sec": 120,
+    "clear_data_on_start": true,
+    "rotate_identity": true,
+    "rotate_via": "qute",
+    "rotate_gsf": true
+  },
+  "otp_provider": {
+    "enabled": true,
+    "type": "nexnum",
+    "api_key": "nxn_live_wmtVI7Cq2Qb0Tuv920YZ4w78lLpgU0St",
+    "service": "jx",
+    "country": 22,
+    "phone_code": "91",
+    "provider": "4591",
+    "max_price": 0.1,
+    "price_usd": 0.1,
+    "base_url": "https://nexnum.in/stubs/handler_api.php",
+    "poll_interval_sec": 3,
+    "max_wait_sec": 120,
+    "resend_after_sec": 40,
+    "resend_attempts": 3,
+    "max_registered_retries": 5,
+    "api_pool_rounds": 15,
+    "check_url": "https://checker.otpcart.xyz/api/check-swiggy",
+    "api_pool_size": 6
+  },
+  "otp_presets": {
+    "uotp": {
+      "type": "uotp",
+      "api_key": "sAsJql9yiuimUSmQmHC2sMLsMRtNinLJ86Zrmet8",
+      "service": "swiggy",
+      "country": 22,
+      "operator": "3",
+      "base_url": "https://uotp.store/api/stubs/handler_api.php"
+    },
+    "nexnum": {
+      "type": "nexnum",
+      "api_key": "nxn_live_wmtVI7Cq2Qb0Tuv920YZ4w78lLpgU0St",
+      "service": "jx",
+      "country": 22,
+      "provider": "4591",
+      "max_price": 0.1,
+      "price_usd": 0.1,
+      "base_url": "https://nexnum.in/stubs/handler_api.php"
+    },
+    "grizzly": {
+      "type": "grizzlysms",
+      "api_key": "804def05f9fa4a8469bf9704f1edfa73",
+      "service": "hp",
+      "country": 22,
+      "base_url": "https://api.grizzlysms.com/stubs/handler_api.php"
+    },
+    "smsactivate": {
+      "type": "smsactivate",
+      "api_key": "",
+      "service": "cw",
+      "country": 22,
+      "base_url": "https://api.sms-activate.org/stubs/handler_api.php"
+    },
+    "tiger": {
+      "type": "tiger",
+      "api_key": "",
+      "service": "jx",
+      "country": 22,
+      "base_url": "https://api.tiger-sms.com/stubs/handler_api.php"
+    },
+    "smshub": {
+      "type": "smshub",
+      "api_key": "",
+      "service": "cw",
+      "country": 22,
+      "base_url": "https://smshub.org/stubs/handler_api.php"
+    },
+    "5sim": {
+      "type": "5sim",
+      "api_key": "",
+      "service": "swiggy",
+      "country_name": "india",
+      "operator": "any",
+      "base_url": "https://5sim.net/v1/user"
+    },
+    "daisysms": {
+      "type": "daisysms",
+      "api_key": "",
+      "service": "swiggy",
+      "country": 22,
+      "base_url": "https://daisysms.com/stubs/handler_api.php"
+    },
+    "generic": {
+      "type": "generic",
+      "api_key": "",
+      "service": "swiggy",
+      "country": 22,
+      "base_url": "https://api.sms-activate.org/stubs/handler_api.php"
+    }
+  },
+  "proxy": {
+    "enabled": true,
+    "url": "http://0395a6a73a993fdfc430__cr.in:99b3f6aec7cb0503@gw.dataimpulse.com:823/"
+  },
+  "ui": {
+    "phone_field_keywords": [
+      "mobile number",
+      "text field"
+    ],
+    "continue_keywords": [
+      "continue"
+    ],
+    "otp_field_keywords": [
+      "otp",
+      "text field"
+    ],
+    "name_field_keywords": [
+      "enter your name",
+      "your name",
+      "name"
+    ],
+    "referral_link_keywords": [
+      "refer",
+      "referral",
+      "have a code",
+      "apply"
+    ],
+    "referral_field_keywords": [
+      "referral code",
+      "refer code",
+      "enter code"
+    ],
+    "referral_submit_keywords": [
+      "apply",
+      "submit"
+    ],
+    "fallback": {
+      "phone_field": [
+        360,
+        440
+      ],
+      "continue": [
+        360,
+        1074
+      ],
+      "otp_field": [
+        360,
+        700
+      ],
+      "name_field": [
+        360,
+        500
+      ],
+      "referral_link": [
+        360,
+        900
+      ],
+      "referral_field": [
+        360,
+        500
+      ],
+      "apply_referral": [
+        360,
+        1074
+      ]
+    }
+  },
+  "captured_payloads": {
+    "note": "TLS pinning bypassed via taichi+SSLUnpinning (findMatchingPins hook) with SELinux permissive. The signup JSON API on profile.swiggy.com is fully decrypted and directly callable from a PC (no awswaf token needed on profile endpoints). See swiggy_api_signup.py: GET /api/v3/app/sms_otp?mobile=X -> {tid,sid}; POST /api/v3/app/login/verify?otp_source=Sms-automatic {cloningSignalsData,otp} -> {tid,sid}; POST /api/v3/app/signup {cloningSignalsData,signUp:{mobile,name,email}} -> session. Send cloningSignalsData all-zero to avoid the 'cloned app' (status 10) rejection caused by VMOS/taichi signals.",
+    "hosts": [
+      "disc.swiggy.com",
+      "analytics.swiggy.com",
+      "fna.swiggy.com",
+      "maps.swiggy.com",
+      "media-assets.swiggy.com",
+      "profile.swiggy.com",
+      "b67f7794189c.edge.sdk.awswaf.com"
+    ]
+  }
+}
