@@ -280,8 +280,8 @@ def create_accounts(chat_id, count, bot):
     cfg = ss.load_config(ss.CONFIG_PATH)
 
     try:
-        bot.send_message(chat_id, f"🚀 Starting creation of {count} Swiggy account(s)...")
-        workers = min(count, 2) if count > 1 else 1
+        workers = min(count, 20)
+        bot.send_message(chat_id, f"🚀 Starting parallel creation of {count} Swiggy account(s) ({workers} concurrent workers)...")
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = [ex.submit(api.create_api_account, cfg) for _ in range(count)]
             for f in as_completed(futs):
