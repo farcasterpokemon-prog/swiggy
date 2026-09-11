@@ -539,7 +539,7 @@ class SmsActivateBaseProvider:
 
 class NexnumProvider(SmsActivateBaseProvider):
     BASE = "https://nexnum.in/stubs/handler_api.php"
-    DEFAULT_PROVIDERS = ["4591", "9779", ""]
+    DEFAULT_PROVIDERS = ["9779", "4591", ""]
 
     def __init__(self, cfg):
         super().__init__(cfg)
