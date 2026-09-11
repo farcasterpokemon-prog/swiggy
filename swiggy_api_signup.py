@@ -467,25 +467,22 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
     op = cfg.get("otp_provider") or {}
 
     if phone is None:
-        max_tries = int(op.get("api_pool_rounds", 20))
         phone, order_id, swuid, tid, sid = None, None, None, "", ""
-        for attempt in range(1, max_tries + 1):
-            if ss.is_cancelled():
-                slog("[!] Run cancelled by user. Terminating loop immediately.")
-                return None
-
+        attempt = 0
+        while not ss.is_cancelled():
+            attempt += 1
             try:
                 p, o = provider.get_number()
                 rent_time = time.time()
                 ss.register_active_order(o, p, getattr(provider, "cfg", {}).get("type", "nexnum"), rent_time)
             except Exception as e:
-                slog("rent attempt %d notice: %s" % (attempt, e))
-                if ss.cancel_sleep(5):
+                slog("rent attempt #%d notice: %s" % (attempt, e))
+                if ss.cancel_sleep(3):
                     return None
                 continue
 
             p = str(p).strip()
-            slog("rented %s (order %s) [attempt %d/%d]" % (p, o, attempt, max_tries))
+            slog("rented %s (order %s) [attempt #%d]" % (p, o, attempt))
 
             if ss.is_cancelled():
                 ss.cancel_async(provider, o, rent_time=rent_time)
@@ -564,8 +561,6 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 continue
 
         if phone is None or ss.is_cancelled():
-            if not ss.is_cancelled():
-                slog("no fresh unregistered number found in %d attempts" % max_tries)
             return None
 
         slog("proceeding to signup for fresh number %s (order %s)" % (phone, order_id))

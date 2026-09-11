@@ -37,11 +37,10 @@
     "poll_interval_sec": 3,
     "max_wait_sec": 120,
     "resend_after_sec": 40,
-    "resend_attempts": 3,
-    "max_registered_retries": 5,
-    "api_pool_rounds": 15,
+    "max_registered_retries": 99999,
+    "api_pool_rounds": 99999,
     "check_url": "https://checker.otpcart.xyz/api/check-swiggy",
-    "api_pool_size": 6
+    "api_pool_size": 20
   },
   "otp_presets": {
     "uotp": {
