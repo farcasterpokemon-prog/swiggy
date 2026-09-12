@@ -261,7 +261,7 @@ def create_accounts(chat_id, count, bot):
             return
         m_str = str(msg).strip()
         # Only notify important milestones to avoid flooding Telegram chat and triggering 429
-        key_words = ["Starting", "Rented", "OTP", "Registered", "Refund", "Created", "Checking", "Account", "cancel"]
+        key_words = ["Starting", "Rented", "OTP", "Registered", "Refund", "Created", "Checking", "Account", "cancel", "PASS", "REJECT", "QUEUED", "hunting"]
         if not any(k.lower() in m_str.lower() for k in key_words):
             return
         now = time.time()
@@ -276,57 +276,48 @@ def create_accounts(chat_id, count, bot):
     api.LOG_HOOK = chat_logger
     ss.LOG_HOOK = chat_logger
 
-    created = 0
+    created = [0]
     newly_created_accounts = []
     cfg = ss.load_config(ss.CONFIG_PATH)
 
+    def on_account(acct, current_idx, total_cnt):
+        acct = ensure_account_fields(acct)
+        created[0] += 1
+        newly_created_accounts.append(acct)
+
+        # Send verified account JSON directly to chat
+        send_account_json(chat_id, acct, bot)
+        bot.send_message(chat_id, f"✅ Account {created[0]}/{count} Ready: {acct.get('mobile')}")
+
+        # Send ZIP batch every 10 accounts if requested in larger runs
+        if len(newly_created_accounts) % 10 == 0:
+            batch_slice = newly_created_accounts[-10:]
+            send_batch_zip(chat_id, batch_slice, bot, batch_title="10-Pack")
+
     try:
-        cfg_workers = cfg.get("workers") or (cfg.get("otp_provider") or {}).get("workers")
-        if cfg_workers:
-            workers = min(max(int(cfg_workers), 1), 100)
-        else:
-            workers = min(max(count * 2, 30), 100)
+        cfg_workers = cfg.get("workers") or (cfg.get("otp_provider") or {}).get("workers") or 50
+        workers = min(max(int(cfg_workers), 10), 100)
 
-        bot.send_message(chat_id, f"🚀 Starting high-speed parallel creation of {count} Swiggy account(s) ({workers} concurrent workers)...")
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = set(ex.submit(api.create_api_account, cfg) for _ in range(workers))
-            while futs and created < count and not (ss.is_cancelled() or RUNNING["cancel"]):
-                done, futs = concurrent.futures.wait(futs, return_when=concurrent.futures.FIRST_COMPLETED)
-                for f in done:
-                    if ss.is_cancelled() or RUNNING["cancel"]:
-                        break
-                    try:
-                        acct = f.result()
-                    except Exception as e:
-                        log("Parallel account creation error: %s" % e)
-                        acct = None
+        bot.send_message(
+            chat_id,
+            f"⚡ *Launching Fully Parallel Multi-Stage Pipeline:*\n"
+            f"• Concurrency: `{workers}` workers\n"
+            f"• Stage 1: Parallel Number Hunting & Pre-Check Swarm\n"
+            f"• Stage 2: Instant Parallel OTP Dispatcher\n"
+            f"• Stage 3: High-Frequency Parallel SMS Poller\n"
+            f"• Stage 4: Instant Account Finalization & Delivery",
+            parse_mode="Markdown",
+        )
 
-                    if acct:
-                        acct = ensure_account_fields(acct)
-                        try:
-                            ok, live_acct = api.verify_session_live(acct)
-                            if ok and live_acct:
-                                acct = live_acct
-                        except Exception:
-                            pass
-
-                        created += 1
-                        newly_created_accounts.append(acct)
-
-                        # Send verified account JSON directly to chat
-                        send_account_json(chat_id, acct, bot)
-                        bot.send_message(chat_id, f"✅ Account {created}/{count} Ready: {acct.get('mobile')}")
-
-                        # Send ZIP batch every 10 accounts if requested in larger runs
-                        if len(newly_created_accounts) % 10 == 0:
-                            batch_slice = newly_created_accounts[-10:]
-                            send_batch_zip(chat_id, batch_slice, bot, batch_title="10-Pack")
-
-                    if created + len(futs) < count and not (ss.is_cancelled() or RUNNING["cancel"]):
-                        futs.add(ex.submit(api.create_api_account, cfg))
+        api.create_pipeline_batch(
+            count=count,
+            cfg=cfg,
+            on_account_created=on_account,
+            is_cancelled=lambda: ss.is_cancelled() or RUNNING["cancel"],
+        )
 
         RUNNING["done"] = count
-        bot.send_message(chat_id, f"🎉 Done! Created {created}/{count} account(s) successfully.")
+        bot.send_message(chat_id, f"🎉 Done! Created {created[0]}/{count} account(s) successfully.")
         if len(newly_created_accounts) >= 2:
             send_batch_zip(chat_id, newly_created_accounts, bot, batch_title="All Created Accounts")
 
@@ -334,7 +325,7 @@ def create_accounts(chat_id, count, bot):
         api.LOG_HOOK = None
         ss.LOG_HOOK = None
         RUNNING["active"] = False
-    return created
+    return created[0]
 
 
 def start_render_health_server():

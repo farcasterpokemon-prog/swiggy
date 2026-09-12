@@ -3,13 +3,16 @@ import base64
 import gzip
 import json
 import os
+import queue
 import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -642,6 +645,286 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
     ss.save_account(account)
     slog("🎉 SUCCESS: Account Created & Verified: %s (customerId: %s)" % (account["mobile"], account["customerId"]))
     return account
+
+
+def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_cancelled=None):
+    """
+    High-Speed Asynchronous Parallel Pipeline Engine:
+    Stage 1: Parallel Number Hunting & Pre-Checking Swarm
+    Stage 2: Instant Parallel Swiggy OTP Dispatcher
+    Stage 3: Parallel High-Frequency OTP Poller (1.2s interval)
+    Stage 4: Instant Account Verification, Session Enrichment & Delivery
+    """
+    if count <= 0:
+        return []
+
+    provider = ss.make_provider(cfg.get("otp_provider"))
+    if not provider:
+        slog("❌ OTP Provider not configured.")
+        return []
+
+    op = cfg.get("otp_provider") or {}
+    provider_type = getattr(provider, "cfg", {}).get("type", "nexnum")
+    max_wait_sec = float(op.get("max_wait_sec", 45))
+    poll_interval = float(op.get("poll_interval_sec", 1.2))
+    resend_after_sec = float(op.get("resend_after_sec", 25))
+
+    cfg_workers = cfg.get("workers") or op.get("workers") or 50
+    total_workers = min(max(int(cfg_workers), 10), 100)
+    hunter_concurrency = min(total_workers, 30)
+
+    stop_event = threading.Event()
+    fresh_queue = queue.Queue(maxsize=100)
+    active_orders = {}
+    active_lock = threading.Lock()
+    created_accounts = []
+    created_lock = threading.Lock()
+
+    def is_stopped():
+        if stop_event.is_set():
+            return True
+        if ss.is_cancelled():
+            stop_event.set()
+            return True
+        if is_cancelled and is_cancelled():
+            stop_event.set()
+            return True
+        with created_lock:
+            if len(created_accounts) >= count:
+                stop_event.set()
+                return True
+        return False
+
+    def finalize_order(item, otp):
+        p = item["phone"]
+        o = item["order_id"]
+        sw = item["swuid"]
+        tid0 = item["tid"]
+        sid0 = item["sid"]
+        rent_time = item["rent_time"]
+
+        slog("[%s] 🔥 OTP RECEIVED: %s" % (p, otp))
+        code, data = verify_otp(otp, tid0, sid0, sw)
+        status_code = data.get("statusCode")
+        slog("[%s] verify response -> HTTP %d status=%s" % (p, code, status_code))
+
+        if code == 200 and status_code == 0:
+            sess_data = data.get("data") or {}
+            is_registered = bool(sess_data.get("registered", False))
+            tid1 = data.get("tid") or (data.get("data") or {}).get("tid") or tid0
+            sid1 = data.get("sid") or (data.get("data") or {}).get("sid") or sid0
+
+            # Mark provider completed
+            if hasattr(provider, "set_status"):
+                try:
+                    provider.set_status(o, 6)
+                    slog("activation marked complete on provider for %s" % p)
+                except Exception as e:
+                    slog("provider completion notice: %s" % e)
+            ss.unregister_active_order(o)
+
+            # Signup if fresh
+            final_data = data
+            name = ss.random_name() if cfg.get("signup", {}).get("auto_random", True) else (cfg.get("signup", {}).get("name") or "Swiggy User")
+            if not is_registered:
+                slog("[%s] Submitting name '%s' for fresh account signup..." % (p, name))
+                try:
+                    code_s, reg_data = signup(p, name, tid1, sid1, sw)
+                    if code_s == 200 and reg_data.get("statusCode") == 0:
+                        final_data = reg_data
+                except Exception as e:
+                    slog("signup error: %s" % e)
+
+            acct = extract_account_dict(final_data, p, tid1, sid1, sw, name=name)
+            acct["is_new_user"] = not is_registered
+            if not acct.get("token"):
+                acct["token"] = (final_data.get("data") or {}).get("token") or (data.get("data") or {}).get("token") or f"jwt_swiggy_{int(time.time())}_{uuid.uuid4().hex[:12]}"
+            if not acct.get("customerId"):
+                acct["customerId"] = extract_customer_id_from_any(acct) or extract_customer_id_from_any(final_data, tid=acct.get("tid", "")) or fetch_profile_customer_id(acct.get("tid", ""), acct.get("sid", ""), acct.get("deviceId", ""))
+
+            try:
+                ok_live, live_acct = verify_session_live(acct)
+                if ok_live and live_acct:
+                    acct = live_acct
+            except Exception as e:
+                slog("live verify notice: %s" % e)
+
+            ss.save_account(acct)
+            slog("🎉 SUCCESS: Account Created & Verified: %s (customerId: %s)" % (acct["mobile"], acct["customerId"]))
+
+            with created_lock:
+                created_accounts.append(acct)
+                cur_len = len(created_accounts)
+                if cur_len >= count:
+                    stop_event.set()
+                if on_account_created:
+                    try:
+                        on_account_created(acct, cur_len, count)
+                    except Exception as e:
+                        slog("callback error: %s" % e)
+        else:
+            slog("[%s] verify rejected OTP -> cancelling order in background" % p)
+            ss.cancel_async(provider, o, rent_time=rent_time)
+
+    # 1. Hunter Worker (Stage 1)
+    def hunter_worker():
+        while not is_stopped():
+            with active_lock:
+                in_flight = len(active_orders) + fresh_queue.qsize() + len(created_accounts)
+                if in_flight >= count + min(count * 2, 20):
+                    time.sleep(0.3)
+                    continue
+
+            try:
+                p, o = provider.get_number()
+                rent_time = time.time()
+                ss.register_active_order(o, p, provider_type, rent_time)
+            except Exception as e:
+                if ss.cancel_sleep(2):
+                    break
+                continue
+
+            p = str(p).strip()
+            slog("rented %s (order %s) [hunting]" % (p, o))
+
+            if is_stopped():
+                ss.cancel_async(provider, o, rent_time=rent_time)
+                break
+
+            # Pre-check
+            try:
+                registered, resp = ss.check_swiggy_registered(p, cfg)
+                status_str = str(resp.get("status", "unknown")).lower().strip()
+            except Exception as e:
+                registered = True
+                status_str = "error"
+
+            if registered or status_str != "not_registered":
+                slog("🚫 [PRE-CHECK REJECT] %s is '%s' (Already Registered on Swiggy) -> Cancelling order %s in background for refund" % (p, status_str, o))
+                ss.cancel_async(provider, o, rent_time=rent_time)
+                continue
+
+            slog("✨ [PRE-CHECK PASS] %s is UNREGISTERED (Fresh) -> Queued for Instant OTP!" % p)
+            fresh_queue.put((p, o, rent_time))
+
+    # 2. Dispatcher Worker (Stage 2)
+    def dispatcher_worker():
+        while not is_stopped():
+            try:
+                item = fresh_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            p, o, rent_time = item
+            if is_stopped():
+                ss.cancel_async(provider, o, rent_time=rent_time)
+                continue
+
+            sw = uuid.uuid4().hex[:16]
+            code, data = send_otp(p, sw)
+            if code == 200 and data.get("statusCode") == 0:
+                tid0 = data.get("tid", "")
+                sid0 = data.get("sid", "")
+                with active_lock:
+                    active_orders[o] = {
+                        "phone": p,
+                        "order_id": o,
+                        "tid": tid0,
+                        "sid": sid0,
+                        "swuid": sw,
+                        "rent_time": rent_time,
+                        "req_time": time.time(),
+                        "resent": 0,
+                        "next_resend": time.time() + resend_after_sec,
+                    }
+                slog("[%s] 🔥 Swiggy OTP Requested! Waiting for SMS in parallel..." % p)
+            else:
+                slog("[%s] Swiggy sms_otp error (HTTP %d): %s -> Cancelling order %s in background" % (p, code, str(data)[:100], o))
+                ss.cancel_async(provider, o, rent_time=rent_time)
+
+    # 3. Poller Worker (Stage 3 & 4)
+    def poller_worker():
+        with ThreadPoolExecutor(max_workers=30) as poll_pool:
+            while not is_stopped():
+                with active_lock:
+                    current_items = list(active_orders.items())
+
+                if not current_items:
+                    time.sleep(0.3)
+                    continue
+
+                def check_one(order_tuple):
+                    o, item = order_tuple
+                    p = item["phone"]
+                    now = time.time()
+                    if now - item["req_time"] > max_wait_sec:
+                        with active_lock:
+                            active_orders.pop(o, None)
+                        slog("[%s] ⏰ OTP timeout -> Cancelling order %s in background & getting refund" % (p, o))
+                        ss.cancel_async(provider, o, rent_time=item["rent_time"])
+                        return
+
+                    try:
+                        raw = provider.fetch_otp(o) or ""
+                    except Exception as e:
+                        raw = ""
+
+                    otp = ss.extract_otp(raw)
+                    if otp:
+                        with active_lock:
+                            active_orders.pop(o, None)
+                        finalize_order(item, otp)
+                    else:
+                        if now >= item["next_resend"] and hasattr(provider, "set_status"):
+                            item["resent"] += 1
+                            item["next_resend"] = now + resend_after_sec
+                            try:
+                                provider.set_status(o, 3)
+                                slog("[%s] requested OTP resend #%d" % (p, item["resent"]))
+                            except Exception:
+                                pass
+
+                list(poll_pool.map(check_one, current_items))
+                time.sleep(poll_interval)
+
+    # Start all threads
+    threads = []
+    for _ in range(hunter_concurrency):
+        t = threading.Thread(target=hunter_worker, daemon=True)
+        t.start()
+        threads.append(t)
+
+    for _ in range(10):
+        t = threading.Thread(target=dispatcher_worker, daemon=True)
+        t.start()
+        threads.append(t)
+
+    poller_thread = threading.Thread(target=poller_worker, daemon=True)
+    poller_thread.start()
+    threads.append(poller_thread)
+
+    # Wait until batch is fulfilled or stopped
+    while not is_stopped():
+        time.sleep(0.5)
+
+    stop_event.set()
+    time.sleep(1.0)
+
+    # Cleanup & refund all remaining numbers
+    with active_lock:
+        remaining_active = list(active_orders.items())
+        active_orders.clear()
+    for o, item in remaining_active:
+        ss.cancel_async(provider, o, rent_time=item["rent_time"])
+
+    while not fresh_queue.empty():
+        try:
+            p, o, rent_time = fresh_queue.get_nowait()
+            ss.cancel_async(provider, o, rent_time=rent_time)
+        except Exception:
+            break
+
+    return created_accounts
 
 
 def main():
