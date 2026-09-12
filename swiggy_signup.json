@@ -37,7 +37,7 @@
     "poll_interval_sec": 1.5,
     "max_wait_sec": 45,
     "resend_after_sec": 25,
-    "precheck_enabled": false,
+    "precheck_enabled": true,
     "workers": 50,
     "max_registered_retries": 99999,
     "api_pool_rounds": 99999,
