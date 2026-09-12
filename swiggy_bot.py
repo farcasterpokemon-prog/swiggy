@@ -677,6 +677,36 @@ def register_handlers(bot, cfg):
         bal = ss.get_provider_balance(op)
         safe_send_message(bot, m.chat.id, f"💳 Live Balance: `{bal}`", parse_mode="Markdown")
 
+    @bot.message_handler(commands=["setprice", "price", "maxprice"])
+    def cmd_setprice(m):
+        if not is_authorized(m.chat.id, cfg, bot, m):
+            return
+        parts = (m.text or "").split(maxsplit=1)
+        if len(parts) < 2:
+            cfg_data = ss.load_config(ss.CONFIG_PATH)
+            op = cfg_data.get("otp_provider") or {}
+            cur_price = op.get("max_price", "N/A")
+            safe_reply(bot, m, f"💲 *Current Max Price:* `${cur_price}`\n\nUsage: `/setprice <amount>` (e.g. `/setprice 0.07`)", parse_mode="Markdown")
+            return
+        try:
+            val = float(parts[1].strip().replace("$", ""))
+            cfg_data = ss.load_config(ss.CONFIG_PATH)
+            op = cfg_data.get("otp_provider") or {}
+            op["max_price"] = val
+            op["price_usd"] = val
+            presets = cfg_data.get("otp_presets") or {}
+            ptype = str(op.get("type", "nexnum")).lower()
+            if ptype in presets:
+                presets[ptype]["max_price"] = val
+                presets[ptype]["price_usd"] = val
+            cfg_data["otp_provider"] = op
+            cfg_data["otp_presets"] = presets
+            with open(ss.CONFIG_PATH, "w", encoding="utf-8") as fh:
+                json.dump(cfg_data, fh, indent=2)
+            safe_reply(bot, m, f"✅ *Max number buy price updated to:* `${val}`", parse_mode="Markdown")
+        except Exception as e:
+            safe_reply(bot, m, f"❌ Invalid price format: {e}", parse_mode="Markdown")
+
     @bot.message_handler(commands=["otpconfig"])
     def cmd_otpconfig(m):
         if not is_authorized(m.chat.id, cfg, bot, m):
