@@ -34,13 +34,15 @@
     "max_price": 0.07,
     "price_usd": 0.07,
     "base_url": "https://nexnum.in/stubs/handler_api.php",
-    "poll_interval_sec": 3,
-    "max_wait_sec": 120,
-    "resend_after_sec": 40,
+    "poll_interval_sec": 1.5,
+    "max_wait_sec": 45,
+    "resend_after_sec": 25,
+    "precheck_enabled": false,
+    "workers": 50,
     "max_registered_retries": 99999,
     "api_pool_rounds": 99999,
     "check_url": "https://checker.otpcart.xyz/api/check-swiggy",
-    "api_pool_size": 20
+    "api_pool_size": 50
   },
   "otp_presets": {
     "uotp": {

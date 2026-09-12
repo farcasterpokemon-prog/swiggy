@@ -281,8 +281,13 @@ def create_accounts(chat_id, count, bot):
     cfg = ss.load_config(ss.CONFIG_PATH)
 
     try:
-        workers = min(count, 100)
-        bot.send_message(chat_id, f"🚀 Starting parallel creation of {count} Swiggy account(s) ({workers} concurrent workers)...")
+        cfg_workers = cfg.get("workers") or (cfg.get("otp_provider") or {}).get("workers")
+        if cfg_workers:
+            workers = min(max(int(cfg_workers), 1), 100)
+        else:
+            workers = min(max(count * 2, 30), 100)
+
+        bot.send_message(chat_id, f"🚀 Starting high-speed parallel creation of {count} Swiggy account(s) ({workers} concurrent workers)...")
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = set(ex.submit(api.create_api_account, cfg) for _ in range(workers))
             while futs and created < count and not (ss.is_cancelled() or RUNNING["cancel"]):
@@ -369,6 +374,8 @@ def register_handlers(bot, cfg):
             m,
             "Swiggy Account Bot\n\n"
             "/create N - create N accounts (1..100)\n"
+            "/workers N - ⚡ set parallel workers concurrency (1..100)\n"
+            "/setprice <amt> - 💲 set max number buy price (e.g. 0.07)\n"
             "/cancelall - 🚫 cancel all active numbers & instant refund\n"
             "/cancel - stop current run\n"
             "/status - view run status & active rentals\n"
@@ -712,6 +719,42 @@ def register_handlers(bot, cfg):
             safe_reply(bot, m, f"✅ *Max number buy price updated to:* `${val}`", parse_mode="Markdown")
         except Exception as e:
             safe_reply(bot, m, f"❌ Invalid price format: {e}", parse_mode="Markdown")
+
+    @bot.message_handler(commands=["workers", "setworkers", "speed", "concurrency"])
+    def cmd_workers(m):
+        if not is_authorized(m.chat.id, cfg, bot, m):
+            return
+        parts = (m.text or "").split(maxsplit=1)
+        cfg_data = ss.load_config(ss.CONFIG_PATH)
+        cur_w = cfg_data.get("workers") or (cfg_data.get("otp_provider") or {}).get("workers", 50)
+        if len(parts) < 2:
+            safe_reply(
+                bot,
+                m,
+                f"⚡ *Current Concurrency:* `{cur_w}` parallel workers\n\n"
+                f"Usage: `/workers <1-100>` (e.g. `/workers 50` or `/workers 100`)",
+                parse_mode="Markdown",
+            )
+            return
+        try:
+            val = int(parts[1].strip())
+            if val < 1 or val > 100:
+                safe_reply(bot, m, "⚠️ Workers limit must be between 1 and 100.", parse_mode="Markdown")
+                return
+            cfg_data["workers"] = val
+            if "otp_provider" in cfg_data:
+                cfg_data["otp_provider"]["workers"] = val
+            with open(ss.CONFIG_PATH, "w", encoding="utf-8") as fh:
+                json.dump(cfg_data, fh, indent=2)
+            safe_reply(
+                bot,
+                m,
+                f"🚀 *Concurrency updated to:* `{val}` parallel workers!\n"
+                f"All batch creations will run with ultra-high speed.",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            safe_reply(bot, m, f"❌ Invalid worker number: {e}", parse_mode="Markdown")
 
     @bot.message_handler(commands=["otpconfig"])
     def cmd_otpconfig(m):

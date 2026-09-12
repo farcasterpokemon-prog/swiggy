@@ -774,7 +774,7 @@ class GenericSmsProvider(SmsActivateBaseProvider):
     pass
 
 
-def check_single_pass(mobile, url, timeout=8):
+def check_single_pass(mobile, url, timeout=3):
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -838,40 +838,21 @@ def check_single_pass(mobile, url, timeout=8):
 
 def check_swiggy_registered(mobile, cfg):
     """
-    Strict Double-Pass Registration Checker.
-    ONLY returns is_registered=False (proceed) when BOTH Pass 1 and Pass 2 are STRICTLY 'not_registered'.
-    In ALL OTHER SCENARIOS ('registered', 'unknown', 'error', 'timeout'):
-    returns is_registered=True (REJECT & CANCEL number).
+    Fast Registration Checker.
+    Returns is_registered=False when 'not_registered'.
     """
     url = cfg.get("check_url") or "https://checker.otpcart.xyz/api/check-swiggy"
     mobile = str(mobile).strip()
 
-    # Pass 1
     try:
-        status1, data1 = check_single_pass(mobile, url)
+        status1, data1 = check_single_pass(mobile, url, timeout=3)
     except Exception as e:
         status1, data1 = "error", {"error": str(e), "status": "error"}
 
-    # If Pass 1 is NOT strictly 'not_registered' (e.g. 'unknown', 'registered', 'error'), reject immediately!
-    if status1 != "not_registered":
-        data1.setdefault("status", status1)
-        return True, data1
-
-    time.sleep(0.4)
-
-    # Pass 2 (Verification Pass)
-    try:
-        status2, data2 = check_single_pass(mobile, url)
-    except Exception as e:
-        status2, data2 = "error", {"error": str(e), "status": "error"}
-
-    # If Pass 2 is NOT strictly 'not_registered', reject immediately!
-    if status2 != "not_registered":
-        data2.setdefault("status", status2)
-        return True, data2
-
-    # Both Pass 1 and Pass 2 are 100% verified 'not_registered'
-    return False, {"status": "not_registered", "mobile": mobile, "verified_2pass": True}
+    if status1 == "not_registered":
+        return False, {"status": "not_registered", "mobile": mobile}
+    data1.setdefault("status", status1)
+    return True, data1
 
 
 def make_provider(op):
@@ -1299,9 +1280,9 @@ def tap_center(adb, node):
 def get_otp(adb, provider, op, phone, order_id, s):
     source = s.get("otp_source", "device")
     if source == "provider" and provider:
-        max_wait = op.get("max_wait_sec", 180)
-        interval = op.get("poll_interval_sec", 4)
-        resend_at = op.get("resend_after_sec", 45)
+        max_wait = op.get("max_wait_sec", 45)
+        interval = op.get("poll_interval_sec", 1.5)
+        resend_at = op.get("resend_after_sec", 25)
         log("waiting for OTP from provider (max %ds)" % max_wait)
         end = time.time() + max_wait
         raw = ""

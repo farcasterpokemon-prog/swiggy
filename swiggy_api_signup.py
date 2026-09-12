@@ -488,20 +488,18 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 ss.cancel_async(provider, o, rent_time=rent_time)
                 return None
 
-            # Layer 1: Strict 2-Pass Registration Pre-Check
-            try:
-                registered, resp = ss.check_swiggy_registered(p, cfg)
-                status_str = str(resp.get("status", "unknown")).lower().strip()
-                slog("🔍 Pre-checker %s -> %s" % (p, status_str))
-            except Exception as e:
-                slog("pre-checker error for %s: %s" % (p, e))
-                registered = True
-                status_str = "error"
-
-            if registered or status_str != "not_registered":
-                slog("🚫 [PRE-CHECK REJECT] %s is '%s' -> Cancelling order %s in background for refund & buying next number immediately..." % (p, status_str, o))
-                ss.cancel_async(provider, o, rent_time=rent_time)
-                continue
+            # Optional Pre-Check (only if explicitly enabled in config)
+            if cfg.get("otp_provider", {}).get("precheck_enabled", False) or cfg.get("signup", {}).get("precheck_enabled", False):
+                try:
+                    registered, resp = ss.check_swiggy_registered(p, cfg)
+                    status_str = str(resp.get("status", "unknown")).lower().strip()
+                    slog("🔍 Pre-checker %s -> %s" % (p, status_str))
+                    if registered or status_str != "not_registered":
+                        slog("🚫 [PRE-CHECK REJECT] %s is '%s' -> Cancelling order %s in background for refund & buying next number immediately..." % (p, status_str, o))
+                        ss.cancel_async(provider, o, rent_time=rent_time)
+                        continue
+                except Exception as e:
+                    slog("pre-checker notice for %s: %s" % (p, e))
 
             if ss.is_cancelled():
                 ss.cancel_async(provider, o, rent_time=rent_time)
