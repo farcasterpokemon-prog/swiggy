@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 import zipfile
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -283,36 +284,41 @@ def create_accounts(chat_id, count, bot):
         workers = min(count, 100)
         bot.send_message(chat_id, f"🚀 Starting parallel creation of {count} Swiggy account(s) ({workers} concurrent workers)...")
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = [ex.submit(api.create_api_account, cfg) for _ in range(count)]
-            for f in as_completed(futs):
-                if ss.is_cancelled() or RUNNING["cancel"]:
-                    break
-                try:
-                    acct = f.result()
-                except Exception as e:
-                    log("Parallel account creation error: %s" % e)
-                    acct = None
-
-                if acct:
-                    acct = ensure_account_fields(acct)
+            futs = set(ex.submit(api.create_api_account, cfg) for _ in range(workers))
+            while futs and created < count and not (ss.is_cancelled() or RUNNING["cancel"]):
+                done, futs = concurrent.futures.wait(futs, return_when=concurrent.futures.FIRST_COMPLETED)
+                for f in done:
+                    if ss.is_cancelled() or RUNNING["cancel"]:
+                        break
                     try:
-                        ok, live_acct = api.verify_session_live(acct)
-                        if ok and live_acct:
-                            acct = live_acct
-                    except Exception:
-                        pass
+                        acct = f.result()
+                    except Exception as e:
+                        log("Parallel account creation error: %s" % e)
+                        acct = None
 
-                    created += 1
-                    newly_created_accounts.append(acct)
+                    if acct:
+                        acct = ensure_account_fields(acct)
+                        try:
+                            ok, live_acct = api.verify_session_live(acct)
+                            if ok and live_acct:
+                                acct = live_acct
+                        except Exception:
+                            pass
 
-                    # Send verified account JSON directly to chat
-                    send_account_json(chat_id, acct, bot)
-                    bot.send_message(chat_id, f"✅ Account {created}/{count} Ready: {acct.get('mobile')}")
+                        created += 1
+                        newly_created_accounts.append(acct)
 
-                    # Send ZIP batch every 10 accounts if requested in larger runs
-                    if len(newly_created_accounts) % 10 == 0:
-                        batch_slice = newly_created_accounts[-10:]
-                        send_batch_zip(chat_id, batch_slice, bot, batch_title="10-Pack")
+                        # Send verified account JSON directly to chat
+                        send_account_json(chat_id, acct, bot)
+                        bot.send_message(chat_id, f"✅ Account {created}/{count} Ready: {acct.get('mobile')}")
+
+                        # Send ZIP batch every 10 accounts if requested in larger runs
+                        if len(newly_created_accounts) % 10 == 0:
+                            batch_slice = newly_created_accounts[-10:]
+                            send_batch_zip(chat_id, batch_slice, bot, batch_title="10-Pack")
+
+                    if created + len(futs) < count and not (ss.is_cancelled() or RUNNING["cancel"]):
+                        futs.add(ex.submit(api.create_api_account, cfg))
 
         RUNNING["done"] = count
         bot.send_message(chat_id, f"🎉 Done! Created {created}/{count} account(s) successfully.")

@@ -286,21 +286,27 @@ def extract_otp(out):
     if s.startswith("STATUS_OK:"):
         s = s[len("STATUS_OK:") :].strip()
 
-    # 1. Direct 4-6 digit numeric OTP (including starting with 0)
+    # 1. Direct 4-6 digit numeric string
     if re.fullmatch(r"\d{4,6}", s):
         return s
 
-    # 2. Look for lines mentioning swiggy / otp / code / verification / login
-    lines = [
-        l
-        for l in s.splitlines()
-        if re.search(r"swiggy|otp|one[ -]?time|code|verification|login", l, re.I)
-    ]
+    # 2. Look for 6-digit OTP near keywords (swiggy / otp / code / verification / is)
+    m_key = re.search(r"(?:swiggy|otp|code|verification|login|is)\D{0,15}(\d{6})\b", s, re.I)
+    if m_key:
+        return m_key.group(1)
+
+    # 3. Any 6-digit numeric match
+    m6 = re.findall(r"\b\d{6}\b", s)
+    if m6:
+        return m6[0]
+
+    # 4. Keyword search with 4-6 digits
+    lines = [l for l in s.splitlines() if re.search(r"swiggy|otp|one[ -]?time|code|verification|login", l, re.I)]
     for l in lines:
         for m in re.findall(r"\b\d{4,6}\b", l):
             return m
 
-    # 3. Any 4-6 digit match in the full text (accepting leading 0)
+    # 5. Any 4-6 digit match in the full text
     for m in re.findall(r"\b\d{4,6}\b", s):
         return m
 

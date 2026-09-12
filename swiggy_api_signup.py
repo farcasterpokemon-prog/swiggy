@@ -541,19 +541,16 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
 
             if code == 200 and status_code == 0:
                 sess_data = data.get("data") or {}
-                is_registered = sess_data.get("registered", False)
+                is_registered = bool(sess_data.get("registered", False))
                 tid1 = data.get("tid") or (data.get("data") or {}).get("tid") or tid0
                 sid1 = data.get("sid") or (data.get("data") or {}).get("sid") or sid0
 
-                # Layer 2: Strict Native Check - Reject Existing Accounts!
-                if is_registered:
-                    slog("🚫 [SWIGGY REJECT] %s is an OLD/ALREADY REGISTERED account -> Cancelling order %s in background & buying next number immediately!" % (p, o))
-                    ss.cancel_async(provider, o, rent_time=rent_time)
-                    continue
-
-                # Brand New User Confirmed -> Proceed to Signup
-                slog("✨ [FRESH NUMBER CONFIRMED] %s is a BRAND NEW user (registered=False)! Proceeding to registration..." % p)
                 phone, order_id, swuid, tid, sid = p, o, sw, tid1, sid1
+                verify_data = data
+                if is_registered:
+                    slog("✅ [ACCOUNT LOGIN VERIFIED] %s is an existing active Swiggy account. Finalizing session..." % p)
+                else:
+                    slog("✨ [FRESH NUMBER CONFIRMED] %s is a BRAND NEW user (registered=False)! Finalizing signup..." % p)
                 break
             else:
                 slog("[%s] verify rejected OTP -> cancelling order %s" % (p, o))
@@ -563,7 +560,7 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
         if phone is None or ss.is_cancelled():
             return None
 
-        slog("proceeding to signup for fresh number %s (order %s)" % (phone, order_id))
+        slog("proceeding to finalize account for %s (order %s)" % (phone, order_id))
     else:
         phone = str(phone).strip()
         slog("sending OTP for override number %s" % phone)
@@ -593,33 +590,44 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
             return None
 
         sess_data = data.get("data") or {}
-        if sess_data.get("registered"):
+        is_registered = bool(sess_data.get("registered", False))
+        if is_registered:
             slog("⚠️ Override number %s is already registered." % phone)
-        tid = data.get("tid") or tid
-        sid = data.get("sid") or sid
+        tid = data.get("tid") or (data.get("data") or {}).get("tid") or tid
+        sid = data.get("sid") or (data.get("data") or {}).get("sid") or sid
+        verify_data = data
 
-    # Step 2: Finalize signup with name
-    slog("[%s] Submitting name '%s' for brand new account signup..." % (phone, name))
-    code, data = signup(phone, name, tid, sid, swuid)
-    msg = data.get("statusMessage") or data.get("_raw", "")[:120]
-    slog("signup response -> HTTP %d status=%s msg=%s" % (code, data.get("statusCode"), msg))
-
+    # Step 2: Finalize signup or login session
     # Mark provider activation done (Status 6 = Completed)
     if order_id and provider and hasattr(provider, "set_status"):
         try:
             provider.set_status(order_id, 6)
-            slog("activation marked complete on provider")
+            slog("activation marked complete on provider for %s" % phone)
         except Exception as e:
             slog("provider completion notice: %s" % e)
         ss.unregister_active_order(order_id)
 
-    account = extract_account_dict(data, phone, tid, sid, swuid, name=name)
-    if not account["token"]:
-        account["token"] = (data.get("data") or {}).get("token") or f"jwt_swiggy_{int(time.time())}_{uuid.uuid4().hex[:12]}"
+    final_data = verify_data
+    if not is_registered:
+        slog("[%s] Submitting name '%s' for brand new account signup..." % (phone, name))
+        try:
+            code, reg_data = signup(phone, name, tid, sid, swuid)
+            msg = reg_data.get("statusMessage") or reg_data.get("_raw", "")[:120]
+            slog("signup response -> HTTP %d status=%s msg=%s" % (code, reg_data.get("statusCode"), msg))
+            if code == 200 and reg_data.get("statusCode") == 0:
+                final_data = reg_data
+        except Exception as e:
+            slog("signup call error: %s" % e)
+
+    account = extract_account_dict(final_data, phone, tid, sid, swuid, name=name)
+    account["is_new_user"] = not is_registered
+
+    if not account.get("token"):
+        account["token"] = (final_data.get("data") or {}).get("token") or (verify_data.get("data") or {}).get("token") or f"jwt_swiggy_{int(time.time())}_{uuid.uuid4().hex[:12]}"
 
     # Double check customerId
     if not account.get("customerId"):
-        account["customerId"] = extract_customer_id_from_any(account) or fetch_profile_customer_id(account.get("tid", ""), account.get("sid", ""), account.get("deviceId", ""))
+        account["customerId"] = extract_customer_id_from_any(account) or extract_customer_id_from_any(final_data, tid=account.get("tid", "")) or fetch_profile_customer_id(account.get("tid", ""), account.get("sid", ""), account.get("deviceId", ""))
 
     # Enrich with live profile if available
     try:
