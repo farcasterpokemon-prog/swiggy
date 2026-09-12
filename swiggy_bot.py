@@ -261,7 +261,11 @@ def create_accounts(chat_id, count, bot):
             return
         m_str = str(msg).strip()
         # Only notify important milestones to avoid flooding Telegram chat and triggering 429
-        key_words = ["Starting", "Rented", "OTP", "Registered", "Refund", "Created", "Checking", "Account", "cancel", "PASS", "REJECT", "QUEUED", "hunting"]
+        key_words = [
+            "Starting", "Rented", "OTP", "Registered", "Refund", "Created", 
+            "Checking", "Account", "cancel", "PASS", "REJECT", "QUEUED",
+            "notice", "error", "failed", "NO_NUMBERS", "waiting", "Stock", "attempt", "Ready"
+        ]
         if not any(k.lower() in m_str.lower() for k in key_words):
             return
         now = time.time()

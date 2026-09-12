@@ -479,7 +479,11 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 rent_time = time.time()
                 ss.register_active_order(o, p, getattr(provider, "cfg", {}).get("type", "nexnum"), rent_time)
             except Exception as e:
-                slog("rent attempt #%d notice: %s" % (attempt, e))
+                err_str = str(e)
+                if "NO_NUMBERS" in err_str:
+                    slog("⚠️ Notice [attempt #%d]: No numbers in stock at max price. Retrying in 3s (use /setprice to increase)..." % attempt)
+                else:
+                    slog("⚠️ Rent attempt #%d notice: %s" % (attempt, err_str[:120]))
                 if ss.cancel_sleep(3):
                     return None
                 continue
