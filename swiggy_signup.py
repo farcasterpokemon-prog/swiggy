@@ -380,22 +380,9 @@ class OtpProvider:
         return sms
 
 
-PROVIDER_CALL_LOCK = threading.Lock()
-LAST_PROVIDER_CALL_TIME = 0.0
-
-
-def throttled_provider_call(url, headers=None, timeout=35, max_retries=5):
-    global LAST_PROVIDER_CALL_TIME
+def throttled_provider_call(url, headers=None, timeout=25, max_retries=3):
     last_raw = ""
     for attempt in range(1, max_retries + 1):
-        with PROVIDER_CALL_LOCK:
-            now = time.time()
-            gap = now - LAST_PROVIDER_CALL_TIME
-            min_gap = 1.15
-            if gap < min_gap:
-                time.sleep(min_gap - gap)
-            LAST_PROVIDER_CALL_TIME = time.time()
-
         req = urllib.request.Request(
             url,
             headers=headers or {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
@@ -409,7 +396,7 @@ def throttled_provider_call(url, headers=None, timeout=35, max_retries=5):
             except Exception:
                 raw = f"HTTP_{he.code}"
             if he.code == 429 or "RATE_LIMIT" in raw:
-                time.sleep(2.0 * attempt)
+                time.sleep(1.0 * attempt)
                 last_raw = raw
                 continue
         except Exception as e:
@@ -417,7 +404,7 @@ def throttled_provider_call(url, headers=None, timeout=35, max_retries=5):
 
         last_raw = raw
         if "RATE_LIMIT_EXCEEDED" in raw:
-            time.sleep(2.0 * attempt)
+            time.sleep(1.0 * attempt)
             continue
 
         try:
