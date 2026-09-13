@@ -184,20 +184,43 @@ def ensure_account_fields(acct):
 
 
 def send_account_json(chat_id, acct, bot):
-    """Sends individual account JSON file document cleanly to Telegram."""
+    """Sends individual account JSON both as formatted chat text and as a downloadable document."""
+    if not acct or not bot:
+        return False
     try:
         mobile = str(acct.get("mobile") or acct.get("phoneNumber") or "account")
         clean_mob = re.sub(r"[^0-9A-Za-z_-]", "_", mobile)
-        json_bytes = json.dumps(acct, indent=2).encode("utf-8")
+        json_str = json.dumps(acct, indent=2, ensure_ascii=False)
         filename = f"account_{clean_mob}.json"
 
+        # 1. Send readable text formatted JSON block directly into chat
+        name = acct.get("userName") or acct.get("name") or "Swiggy User"
+        cid = acct.get("customerId") or "?"
+        token = acct.get("token") or "?"
+        msg_header = (
+            f"🎉 *Account Created & Verified!*\n"
+            f"📱 *Mobile:* `+91 {mobile}`\n"
+            f"👤 *Name:* `{name}`\n"
+            f"🆔 *Customer ID:* `{cid}`\n"
+            f"🔑 *Token:* `{token}`\n\n"
+            f"📋 *Account JSON:*\n"
+            f"```json\n{json_str}\n```"
+        )
+        safe_send_message(bot, chat_id, msg_header, parse_mode="Markdown")
+
+        # 2. Also send as attached .json file document
+        json_bytes = json_str.encode("utf-8")
+        bio = io.BytesIO(json_bytes)
+        bio.name = filename
+        bio.seek(0)
         for attempt in range(3):
             try:
-                bio = io.BytesIO(json_bytes)
-                bio.name = filename
                 bot.send_document(
                     chat_id,
                     bio,
+                    visible_file_name=filename,
+                    caption=f"📄 `account_{clean_mob}.json`",
+                    parse_mode="Markdown",
                 )
                 log(f"Sent JSON file for {mobile} to {chat_id}")
                 return True
@@ -207,6 +230,7 @@ def send_account_json(chat_id, acct, bot):
                 else:
                     log(f"send_document error: {e}")
                     time.sleep(0.5)
+        return True
     except Exception as e:
         log(f"Failed to send account json: {e}")
     return False
@@ -214,7 +238,7 @@ def send_account_json(chat_id, acct, bot):
 
 def send_batch_zip(chat_id, accounts_list, bot, batch_title="10-Pack"):
     """Packages a list of accounts into an in-memory .zip and sends to Telegram."""
-    if not accounts_list:
+    if not accounts_list or not bot:
         return False
 
     cleaned_list = [ensure_account_fields(dict(a)) for a in accounts_list]
@@ -236,9 +260,13 @@ def send_batch_zip(chat_id, accounts_list, bot, batch_title="10-Pack"):
             try:
                 zbio = io.BytesIO(zip_bytes)
                 zbio.name = zip_filename
+                zbio.seek(0)
                 bot.send_document(
                     chat_id,
                     zbio,
+                    visible_file_name=zip_filename,
+                    caption=f"📦 *{batch_title}* (`{len(cleaned_list)}` accounts attached)",
+                    parse_mode="Markdown",
                 )
                 log(f"Sent batch zip ({len(cleaned_list)} accounts) to chat {chat_id}")
                 return True
