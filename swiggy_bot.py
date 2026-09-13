@@ -55,12 +55,18 @@ def safe_reply(bot, msg, text, parse_mode="Markdown", reply_markup=None):
         return None
     try:
         return bot.reply_to(msg, text, parse_mode=parse_mode, reply_markup=reply_markup)
-    except Exception:
+    except telebot.apihelper.ApiTelegramException as e:
+        if e.error_code == 429:
+            log(f"safe_reply 429 rate limit: {e.description}")
+            return None
         try:
             return bot.reply_to(msg, text, reply_markup=reply_markup)
-        except Exception as e:
-            log(f"safe_reply failed: {e}")
+        except Exception as e2:
+            log(f"safe_reply fallback failed: {e2}")
             return None
+    except Exception as e:
+        log(f"safe_reply failed: {e}")
+        return None
 
 
 def safe_send_message(bot, chat_id, text, parse_mode="Markdown", reply_markup=None):
@@ -68,12 +74,18 @@ def safe_send_message(bot, chat_id, text, parse_mode="Markdown", reply_markup=No
         return None
     try:
         return bot.send_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
-    except Exception:
+    except telebot.apihelper.ApiTelegramException as e:
+        if e.error_code == 429:
+            log(f"safe_send_message 429 rate limit: {e.description}")
+            return None
         try:
             return bot.send_message(chat_id, text, reply_markup=reply_markup)
-        except Exception as e:
-            log(f"safe_send_message failed: {e}")
+        except Exception as e2:
+            log(f"safe_send_message fallback failed: {e2}")
             return None
+    except Exception as e:
+        log(f"safe_send_message failed: {e}")
+        return None
 
 
 def get_control_keyboard():
@@ -184,7 +196,7 @@ def ensure_account_fields(acct):
 
 
 def send_account_json(chat_id, acct, bot):
-    """Sends individual account JSON both as formatted chat text and as a downloadable document."""
+    """Sends individual account JSON both as clean chat text and as a downloadable document."""
     if not acct or not bot:
         return False
     try:
@@ -193,20 +205,19 @@ def send_account_json(chat_id, acct, bot):
         json_str = json.dumps(acct, indent=2, ensure_ascii=False)
         filename = f"account_{clean_mob}.json"
 
-        # 1. Send readable text formatted JSON block directly into chat
+        # 1. Send readable text formatted JSON block directly into chat (plain text so zero markdown parsing errors)
         name = acct.get("userName") or acct.get("name") or "Swiggy User"
         cid = acct.get("customerId") or "?"
         token = acct.get("token") or "?"
         msg_header = (
-            f"🎉 *Account Created & Verified!*\n"
-            f"📱 *Mobile:* `+91 {mobile}`\n"
-            f"👤 *Name:* `{name}`\n"
-            f"🆔 *Customer ID:* `{cid}`\n"
-            f"🔑 *Token:* `{token}`\n\n"
-            f"📋 *Account JSON:*\n"
-            f"```json\n{json_str}\n```"
+            f"🎉 Account Created & Verified!\n"
+            f"📱 Mobile: +91 {mobile}\n"
+            f"👤 Name: {name}\n"
+            f"🆔 Customer ID: {cid}\n"
+            f"🔑 Token: {token}\n\n"
+            f"📋 Account JSON:\n{json_str}"
         )
-        safe_send_message(bot, chat_id, msg_header, parse_mode="Markdown")
+        safe_send_message(bot, chat_id, msg_header, parse_mode=None)
 
         # 2. Also send as attached .json file document
         json_bytes = json_str.encode("utf-8")
@@ -219,17 +230,25 @@ def send_account_json(chat_id, acct, bot):
                     chat_id,
                     bio,
                     visible_file_name=filename,
-                    caption=f"📄 `account_{clean_mob}.json`",
-                    parse_mode="Markdown",
+                    caption=f"📄 account_{clean_mob}.json",
                 )
                 log(f"Sent JSON file for {mobile} to {chat_id}")
                 return True
-            except Exception as e:
-                if "429" in str(e):
-                    time.sleep(2)
+            except telebot.apihelper.ApiTelegramException as e:
+                if e.error_code == 429:
+                    retry_after = 5
+                    try:
+                        retry_after = int(e.result_json.get("parameters", {}).get("retry_after", 5))
+                    except Exception:
+                        pass
+                    log(f"send_document 429 wait {retry_after}s")
+                    time.sleep(min(retry_after, 8))
                 else:
                     log(f"send_document error: {e}")
                     time.sleep(0.5)
+            except Exception as e:
+                log(f"send_document error: {e}")
+                time.sleep(0.5)
         return True
     except Exception as e:
         log(f"Failed to send account json: {e}")
@@ -265,8 +284,7 @@ def send_batch_zip(chat_id, accounts_list, bot, batch_title="10-Pack"):
                     chat_id,
                     zbio,
                     visible_file_name=zip_filename,
-                    caption=f"📦 *{batch_title}* (`{len(cleaned_list)}` accounts attached)",
-                    parse_mode="Markdown",
+                    caption=f"📦 {batch_title} ({len(cleaned_list)} accounts attached)",
                 )
                 log(f"Sent batch zip ({len(cleaned_list)} accounts) to chat {chat_id}")
                 return True
@@ -288,13 +306,21 @@ def create_accounts(chat_id, count, bot):
     RUNNING["total"] = count
     RUNNING["cancel"] = False
 
-    log_queue = queue.Queue()
+    log_queue = queue.Queue(maxsize=100)
     stop_logger = threading.Event()
 
-    IMPORTANT_KEYWORDS = [
+    # Log filter: only deliver key milestone logs to Telegram chat, avoiding spam & 429
+    MILESTONE_KEYWORDS = [
         "Bought number", "PRE-CHECK PASS", "PRE-CHECK REJECT", "Requesting Swiggy OTP",
-        "OTP requested", "OTP RECEIVED", "SUCCESS:", "rejected OTP", "Notice", "timeout",
-        "Cancelled", "Starting", "Ready:"
+        "Waiting up to 2 minutes", "OTP RECEIVED", "ACCOUNT LOGIN VERIFIED",
+        "FRESH NUMBER CONFIRMED", "Swiggy rejected OTP", "Starting", "Done!", "Notice"
+    ]
+    IGNORE_KEYWORDS = [
+        "waiting for OTP from provider", "provider fetch notice", "requested OTP resend",
+        "resend notice", "pre-checker notice", "Unregistered active rental",
+        "activation marked complete", "registered_at", "save_active_orders",
+        "load_active_orders", "fetch_profile_customer_id", "verify_session_live notice",
+        "Checking number", "proceeding to finalize"
     ]
 
     def log_sender_thread():
@@ -303,21 +329,22 @@ def create_accounts(chat_id, count, bot):
             try:
                 msg_item = log_queue.get(timeout=0.2)
             except queue.Empty:
+                if stop_logger.is_set():
+                    break
                 continue
 
-            # Ensure minimum 0.85s gap between Telegram messages to prevent HTTP 429 rate limits
+            # Strict 1.2s delay between messages to stay comfortably within Telegram rate limits
             now = time.time()
             gap = now - last_sent
-            if gap < 0.85:
-                time.sleep(0.85 - gap)
+            if gap < 1.2:
+                time.sleep(1.2 - gap)
 
             try:
-                safe_send_message(bot, chat_id, msg_item, parse_mode=None)
-                last_sent = time.time()
+                res = safe_send_message(bot, chat_id, msg_item, parse_mode=None)
+                if res:
+                    last_sent = time.time()
             except Exception as e:
-                if "429" in str(e):
-                    time.sleep(2.5)
-                pass
+                log(f"log_sender_thread error: {e}")
 
     sender_t = threading.Thread(target=log_sender_thread, daemon=True)
     sender_t.start()
@@ -326,8 +353,13 @@ def create_accounts(chat_id, count, bot):
         if not msg:
             return
         m_str = str(msg).strip()
-        if any(kw in m_str for kw in IMPORTANT_KEYWORDS):
-            log_queue.put(m_str)
+        if any(ign in m_str for ign in IGNORE_KEYWORDS):
+            return
+        if any(kw in m_str for kw in MILESTONE_KEYWORDS):
+            try:
+                log_queue.put_nowait(m_str)
+            except queue.Full:
+                pass
 
     api.LOG_HOOK = chat_logger
     ss.LOG_HOOK = chat_logger
@@ -341,7 +373,7 @@ def create_accounts(chat_id, count, bot):
         safe_send_message(
             bot,
             chat_id,
-            f"🚀 Starting {count} parallel accounts creation!\n• Spawning {workers} concurrent workers buying numbers, pre-checking, and generating accounts in parallel.",
+            f"🚀 Starting {count} parallel accounts creation!\n• Spawning {workers} concurrent worker(s) buying numbers, pre-checking, and generating accounts in parallel.",
             parse_mode=None,
         )
 
@@ -372,7 +404,7 @@ def create_accounts(chat_id, count, bot):
 
                         # Send verified account JSON directly to chat
                         send_account_json(chat_id, acct, bot)
-                        safe_send_message(bot, chat_id, f"✅ Account {created}/{count} Ready: {acct.get('mobile')}", parse_mode=None)
+                        safe_send_message(bot, chat_id, f"✅ Account {created}/{count} Ready: +91 {acct.get('mobile')}", parse_mode=None)
 
                         # Send ZIP batch every 10 accounts if requested in larger runs
                         if len(newly_created_accounts) % 10 == 0:
@@ -393,11 +425,13 @@ def create_accounts(chat_id, count, bot):
         safe_send_message(bot, chat_id, f"⚠️ Error in account creation: {e}", parse_mode=None)
 
     finally:
+        drain_end = time.time() + 6.0
+        while not log_queue.empty() and time.time() < drain_end:
+            time.sleep(0.2)
         stop_logger.set()
         time.sleep(0.5)
         api.LOG_HOOK = None
         ss.LOG_HOOK = None
-        RUNNING["active"] = False
         RUNNING["active"] = False
     return created
 
