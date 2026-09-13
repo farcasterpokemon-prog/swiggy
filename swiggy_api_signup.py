@@ -489,7 +489,7 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 continue
 
             p = str(p).strip()
-            slog("rented %s (order %s) [attempt #%d]" % (p, o, attempt))
+            slog("📱 Bought number %s (Order #%s) [Attempt #%d]" % (p, o, attempt))
 
             if ss.is_cancelled():
                 ss.cancel_async(provider, o, rent_time=rent_time)
@@ -499,9 +499,9 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
             precheck_on = (op.get("precheck_enabled", True) if isinstance(op, dict) else True)
             if precheck_on:
                 try:
+                    slog("🔍 Checking number %s on Swiggy..." % p)
                     registered, resp = ss.check_swiggy_registered(p, cfg)
                     status_str = str(resp.get("status", "unknown")).lower().strip()
-                    slog("🔍 Pre-checking %s -> %s" % (p, status_str))
                 except Exception as e:
                     slog("pre-checker notice for %s: %s" % (p, e))
                     registered = False

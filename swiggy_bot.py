@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import queue
 import re
 import sys
 import threading
@@ -259,27 +260,31 @@ def create_accounts(chat_id, count, bot):
     RUNNING["total"] = count
     RUNNING["cancel"] = False
 
-    last_chat_log_time = [0.0]
+    log_queue = queue.Queue()
+    stop_logger = threading.Event()
+
+    def log_sender_thread():
+        while not stop_logger.is_set() or not log_queue.empty():
+            try:
+                msg_item = log_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            try:
+                bot.send_message(chat_id, msg_item)
+            except Exception as e:
+                if "429" in str(e):
+                    time.sleep(2)
+                pass
+            time.sleep(0.04)
+
+    sender_t = threading.Thread(target=log_sender_thread, daemon=True)
+    sender_t.start()
+
     def chat_logger(msg):
         if not msg:
             return
         m_str = str(msg).strip()
-        # Only notify important milestones to avoid flooding Telegram chat and triggering 429
-        key_words = [
-            "Starting", "Rented", "OTP", "Registered", "Refund", "Created", 
-            "Checking", "Account", "cancel", "PASS", "REJECT", "QUEUED",
-            "notice", "error", "failed", "NO_NUMBERS", "waiting", "Stock", "attempt", "Ready"
-        ]
-        if not any(k.lower() in m_str.lower() for k in key_words):
-            return
-        now = time.time()
-        if now - last_chat_log_time[0] < 1.5:
-            return
-        last_chat_log_time[0] = now
-        try:
-            bot.send_message(chat_id, m_str)
-        except Exception:
-            pass
+        log_queue.put(m_str)
 
     api.LOG_HOOK = chat_logger
     ss.LOG_HOOK = chat_logger
@@ -293,7 +298,7 @@ def create_accounts(chat_id, count, bot):
         bot.send_message(
             chat_id,
             f"🚀 *Starting {count} parallel accounts creation!*\n"
-            f"• All {workers} accounts are buying numbers, pre-checking, requesting OTP & creating accounts simultaneously in parallel.",
+            f"• Spawning {workers} concurrent workers buying numbers, pre-checking, and generating accounts in parallel.",
             parse_mode="Markdown",
         )
 
@@ -341,8 +346,11 @@ def create_accounts(chat_id, count, bot):
             send_batch_zip(chat_id, newly_created_accounts, bot, batch_title="All Created Accounts")
 
     finally:
+        stop_logger.set()
+        time.sleep(0.5)
         api.LOG_HOOK = None
         ss.LOG_HOOK = None
+        RUNNING["active"] = False
         RUNNING["active"] = False
     return created
 
