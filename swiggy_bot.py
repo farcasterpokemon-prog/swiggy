@@ -192,9 +192,11 @@ def send_account_json(chat_id, acct, bot):
 
         for attempt in range(3):
             try:
+                bio = io.BytesIO(json_bytes)
+                bio.name = filename
                 bot.send_document(
                     chat_id,
-                    (filename, json_bytes, "application/json"),
+                    bio,
                 )
                 log(f"Sent JSON file for {mobile} to {chat_id}")
                 return True
@@ -231,9 +233,11 @@ def send_batch_zip(chat_id, accounts_list, bot, batch_title="10-Pack"):
 
         for attempt in range(3):
             try:
+                zbio = io.BytesIO(zip_bytes)
+                zbio.name = zip_filename
                 bot.send_document(
                     chat_id,
-                    (zip_filename, zip_bytes, "application/zip"),
+                    zbio,
                 )
                 log(f"Sent batch zip ({len(cleaned_list)} accounts) to chat {chat_id}")
                 return True

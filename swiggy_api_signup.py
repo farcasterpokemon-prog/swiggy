@@ -551,9 +551,11 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
             slog("[%s] 🔥 OTP RECEIVED: %s" % (p, otp))
             code, data = verify_otp(otp, tid0, sid0, sw)
             status_code = data.get("statusCode")
-            slog("[%s] verify response -> HTTP %d status=%s" % (p, code, status_code))
+            status_msg = data.get("statusMessage") or data.get("message") or data.get("error") or ""
+            slog("[%s] verify response -> HTTP %d status=%s msg='%s'" % (p, code, status_code, status_msg))
 
-            if code == 200 and status_code == 0:
+            is_verify_ok = (code in [200, 201]) and (status_code in [0, "0"] or (status_code is None and bool(data.get("tid"))))
+            if is_verify_ok:
                 sess_data = data.get("data") or {}
                 is_registered = bool(sess_data.get("registered", False))
                 tid1 = data.get("tid") or (data.get("data") or {}).get("tid") or tid0
@@ -567,7 +569,7 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                     slog("✨ [FRESH NUMBER CONFIRMED] %s is a BRAND NEW user (registered=False)! Finalizing signup..." % p)
                 break
             else:
-                slog("[%s] verify rejected OTP -> cancelling order %s" % (p, o))
+                slog("⚠️ [%s] Swiggy rejected OTP (HTTP %d status=%s: '%s') -> Cancelling order %s in background & buying next..." % (p, code, status_code, status_msg or str(data)[:100], o))
                 ss.cancel_async(provider, o, rent_time=rent_time)
                 continue
 
@@ -715,9 +717,11 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
         slog("[%s] 🔥 OTP RECEIVED: %s" % (p, otp))
         code, data = verify_otp(otp, tid0, sid0, sw)
         status_code = data.get("statusCode")
-        slog("[%s] verify response -> HTTP %d status=%s" % (p, code, status_code))
+        status_msg = data.get("statusMessage") or data.get("message") or data.get("error") or ""
+        slog("[%s] verify response -> HTTP %d status=%s msg='%s'" % (p, code, status_code, status_msg))
 
-        if code == 200 and status_code == 0:
+        is_verify_ok = (code in [200, 201]) and (status_code in [0, "0"] or (status_code is None and bool(data.get("tid"))))
+        if is_verify_ok:
             sess_data = data.get("data") or {}
             is_registered = bool(sess_data.get("registered", False))
             tid1 = data.get("tid") or (data.get("data") or {}).get("tid") or tid0
@@ -739,7 +743,7 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
                 slog("[%s] Submitting name '%s' for fresh account signup..." % (p, name))
                 try:
                     code_s, reg_data = signup(p, name, tid1, sid1, sw)
-                    if code_s == 200 and reg_data.get("statusCode") == 0:
+                    if code_s == 200 and reg_data.get("statusCode") in [0, "0"]:
                         final_data = reg_data
                 except Exception as e:
                     slog("signup error: %s" % e)
@@ -772,7 +776,8 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
                     except Exception as e:
                         slog("callback error: %s" % e)
         else:
-            slog("[%s] verify rejected OTP -> cancelling order in background" % p)
+            slog("⚠️ [%s] Swiggy rejected OTP (HTTP %d status=%s: '%s') -> Cancelling order in background..." % (p, code, status_code, status_msg or str(data)[:100]))
+            ss.cancel_async(provider, o, rent_time=rent_time)
             ss.cancel_async(provider, o, rent_time=rent_time)
 
     # 1. Hunter Worker (Stage 1)

@@ -290,23 +290,33 @@ def extract_otp(out):
     if re.fullmatch(r"\d{4,6}", s):
         return s
 
-    # 2. Look for 6-digit OTP near keywords (swiggy / otp / code / verification / is)
-    m_key = re.search(r"(?:swiggy|otp|code|verification|login|is)\D{0,15}(\d{6})\b", s, re.I)
-    if m_key:
-        return m_key.group(1)
+    # 2. Look for 6-digit OTP before keywords (e.g. "123456 is your Swiggy OTP")
+    m_pre = re.search(r"\b(\d{6})\b\s*(?:is\s+your\s+)?(?:swiggy|otp|verification|login|code)", s, re.I)
+    if m_pre:
+        return m_pre.group(1)
 
-    # 3. Any 6-digit numeric match
+    # 3. Look for 6-digit OTP after keywords (e.g. "Your Swiggy verification code is 123456")
+    m_post = re.search(r"(?:swiggy|otp|code|verification|login|is)\D{0,15}(\d{6})\b", s, re.I)
+    if m_post:
+        return m_post.group(1)
+
+    # 4. Any 6-digit numeric match
     m6 = re.findall(r"\b\d{6}\b", s)
     if m6:
         return m6[0]
 
-    # 4. Keyword search with 4-6 digits
+    # 5. Pre/post keyword with 4-6 digits
+    m_pre4 = re.search(r"\b(\d{4,6})\b\s*(?:is\s+your\s+)?(?:swiggy|otp|verification|login|code)", s, re.I)
+    if m_pre4:
+        return m_pre4.group(1)
+
+    # 6. Keyword search with 4-6 digits
     lines = [l for l in s.splitlines() if re.search(r"swiggy|otp|one[ -]?time|code|verification|login", l, re.I)]
     for l in lines:
         for m in re.findall(r"\b\d{4,6}\b", l):
             return m
 
-    # 5. Any 4-6 digit match in the full text
+    # 7. Any 4-6 digit match in the full text
     for m in re.findall(r"\b\d{4,6}\b", s):
         return m
 
