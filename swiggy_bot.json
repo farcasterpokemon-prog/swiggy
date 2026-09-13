@@ -1,4 +1,6 @@
 {
-  "bot_token": "8765688215:AAFnUjoAcc9l1YFKw0WSccHAHtaUyTbQGr8",
-  "allowed_users": []
+  "bot_token": "8993704465:AAFPZHet_H0jLaVo4cQ048eT4k8FQbLv0Ek",
+  "allowed_users": [
+    1626878932
+  ]
 }
