@@ -1312,9 +1312,9 @@ def tap_center(adb, node):
 def get_otp(adb, provider, op, phone, order_id, s):
     source = s.get("otp_source", "device")
     if source == "provider" and provider:
-        max_wait = op.get("max_wait_sec", 45)
+        max_wait = op.get("max_wait_sec", 120)
         interval = op.get("poll_interval_sec", 1.5)
-        resend_at = op.get("resend_after_sec", 25)
+        resend_at = op.get("resend_after_sec", 60)
         log("waiting for OTP from provider (max %ds)" % max_wait)
         end = time.time() + max_wait
         raw = ""
