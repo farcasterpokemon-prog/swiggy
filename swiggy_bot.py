@@ -263,19 +263,33 @@ def create_accounts(chat_id, count, bot):
     log_queue = queue.Queue()
     stop_logger = threading.Event()
 
+    IMPORTANT_KEYWORDS = [
+        "Bought number", "PRE-CHECK PASS", "PRE-CHECK REJECT", "Requesting Swiggy OTP",
+        "OTP requested", "OTP RECEIVED", "SUCCESS:", "rejected OTP", "Notice", "timeout",
+        "Cancelled", "Starting", "Ready:"
+    ]
+
     def log_sender_thread():
+        last_sent = 0.0
         while not stop_logger.is_set() or not log_queue.empty():
             try:
-                msg_item = log_queue.get(timeout=0.1)
+                msg_item = log_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
+
+            # Ensure minimum 0.85s gap between Telegram messages to prevent HTTP 429 rate limits
+            now = time.time()
+            gap = now - last_sent
+            if gap < 0.85:
+                time.sleep(0.85 - gap)
+
             try:
                 safe_send_message(bot, chat_id, msg_item, parse_mode=None)
+                last_sent = time.time()
             except Exception as e:
                 if "429" in str(e):
-                    time.sleep(2)
+                    time.sleep(2.5)
                 pass
-            time.sleep(0.04)
 
     sender_t = threading.Thread(target=log_sender_thread, daemon=True)
     sender_t.start()
@@ -284,7 +298,8 @@ def create_accounts(chat_id, count, bot):
         if not msg:
             return
         m_str = str(msg).strip()
-        log_queue.put(m_str)
+        if any(kw in m_str for kw in IMPORTANT_KEYWORDS):
+            log_queue.put(m_str)
 
     api.LOG_HOOK = chat_logger
     ss.LOG_HOOK = chat_logger
