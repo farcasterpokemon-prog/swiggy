@@ -676,9 +676,9 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
 
     op = cfg.get("otp_provider") or {}
     provider_type = getattr(provider, "cfg", {}).get("type", "nexnum")
-    max_wait_sec = float(op.get("max_wait_sec", 45))
+    max_wait_sec = float(op.get("max_wait_sec", 120))
     poll_interval = float(op.get("poll_interval_sec", 1.2))
-    resend_after_sec = float(op.get("resend_after_sec", 25))
+    resend_after_sec = float(op.get("resend_after_sec", 60))
 
     cfg_workers = cfg.get("workers") or op.get("workers") or 50
     total_workers = min(max(int(cfg_workers), 10), 100)
