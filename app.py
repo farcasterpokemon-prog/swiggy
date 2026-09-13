@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(m
 logger = logging.getLogger("SwiggyWebhookRunner")
 
 PORT = int(os.environ.get("PORT", 10000))
-SERVICE_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://swiggy-bot-9ggo.onrender.com").rstrip("/")
+SERVICE_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://swiggy-telegram-bot.onrender.com").rstrip("/")
 WEBHOOK_URL = f"{SERVICE_URL}/webhook"
 
 import swiggy_bot
