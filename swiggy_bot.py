@@ -270,7 +270,7 @@ def create_accounts(chat_id, count, bot):
             except queue.Empty:
                 continue
             try:
-                bot.send_message(chat_id, msg_item)
+                safe_send_message(bot, chat_id, msg_item, parse_mode=None)
             except Exception as e:
                 if "429" in str(e):
                     time.sleep(2)
@@ -295,11 +295,11 @@ def create_accounts(chat_id, count, bot):
 
     try:
         workers = min(count, 100)
-        bot.send_message(
+        safe_send_message(
+            bot,
             chat_id,
-            f"🚀 *Starting {count} parallel accounts creation!*\n"
-            f"• Spawning {workers} concurrent workers buying numbers, pre-checking, and generating accounts in parallel.",
-            parse_mode="Markdown",
+            f"🚀 Starting {count} parallel accounts creation!\n• Spawning {workers} concurrent workers buying numbers, pre-checking, and generating accounts in parallel.",
+            parse_mode=None,
         )
 
         with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -329,7 +329,7 @@ def create_accounts(chat_id, count, bot):
 
                         # Send verified account JSON directly to chat
                         send_account_json(chat_id, acct, bot)
-                        bot.send_message(chat_id, f"✅ Account {created}/{count} Ready: {acct.get('mobile')}")
+                        safe_send_message(bot, chat_id, f"✅ Account {created}/{count} Ready: {acct.get('mobile')}", parse_mode=None)
 
                         # Send ZIP batch every 10 accounts if requested in larger runs
                         if len(newly_created_accounts) % 10 == 0:
@@ -341,9 +341,13 @@ def create_accounts(chat_id, count, bot):
                         futs.add(ex.submit(api.create_api_account, cfg))
 
         RUNNING["done"] = count
-        bot.send_message(chat_id, f"🎉 Done! Created {created}/{count} account(s) successfully.")
+        safe_send_message(bot, chat_id, f"🎉 Done! Created {created}/{count} account(s) successfully.", parse_mode=None)
         if len(newly_created_accounts) >= 2:
             send_batch_zip(chat_id, newly_created_accounts, bot, batch_title="All Created Accounts")
+
+    except Exception as e:
+        log(f"Fatal in create_accounts: {e}")
+        safe_send_message(bot, chat_id, f"⚠️ Error in account creation: {e}", parse_mode=None)
 
     finally:
         stop_logger.set()
@@ -427,11 +431,11 @@ def register_handlers(bot, cfg):
             except Exception:
                 n = 1
         if n < 1 or n > 100:
-            bot.reply_to(m, "Count must be between 1 and 100.")
+            safe_reply(bot, m, "Count must be between 1 and 100.")
             return
         with RUN_LOCK:
             if RUNNING["active"]:
-                bot.reply_to(m, "A run is already active. Send /cancel to stop.")
+                safe_reply(bot, m, "⚠️ A creation run is already active. Send /cancel or /cancelall to stop it.")
                 return
             t = threading.Thread(target=create_accounts, args=(m.chat.id, n, bot), daemon=True)
             t.start()
