@@ -545,7 +545,7 @@ class SmsActivateBaseProvider:
 
 class NexnumProvider(SmsActivateBaseProvider):
     BASE = "https://nexnum.in/stubs/handler_api.php"
-    DEFAULT_PROVIDERS = ["9779", "4591", ""]
+    DEFAULT_PROVIDERS = ["4591", "9779", ""]
 
     def __init__(self, cfg):
         super().__init__(cfg)
@@ -774,13 +774,19 @@ class GenericSmsProvider(SmsActivateBaseProvider):
     pass
 
 
-def check_single_pass(mobile, url, timeout=3):
+def check_single_pass(mobile, url, timeout=4):
+    clean = re.sub(r"\D", "", str(mobile).strip())
+    if clean.startswith("91") and len(clean) == 12:
+        clean = clean[2:]
+    elif clean.startswith("0") and len(clean) == 11:
+        clean = clean[1:]
+
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
     }
-    payload = json.dumps({"mobile": str(mobile).strip()}).encode("utf-8")
+    payload = json.dumps({"mobile": clean}).encode("utf-8")
     req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     opener = get_opener()
     with opener.open(req, timeout=timeout) as r:
@@ -838,21 +844,37 @@ def check_single_pass(mobile, url, timeout=3):
 
 def check_swiggy_registered(mobile, cfg):
     """
-    Fast Registration Checker.
-    Returns is_registered=False when 'not_registered'.
+    Fast Registration Checker with automatic sanitization and fail-safe fallback.
+    Returns: (is_registered, response_dict)
+    - If strictly 'not_registered' -> (False, {'status': 'not_registered', 'mobile': clean})
+    - If strictly 'registered' -> (True, {'status': 'registered', 'mobile': clean})
+    - If 'error' / 'unknown' -> (False, {'status': status, 'mobile': clean})
     """
-    url = cfg.get("check_url") or "https://checker.otpcart.xyz/api/check-swiggy"
-    mobile = str(mobile).strip()
+    clean = re.sub(r"\D", "", str(mobile).strip())
+    if clean.startswith("91") and len(clean) == 12:
+        clean = clean[2:]
+    elif clean.startswith("0") and len(clean) == 11:
+        clean = clean[1:]
+
+    op = cfg.get("otp_provider") if isinstance(cfg.get("otp_provider"), dict) else {}
+    url = cfg.get("check_url") or op.get("check_url") or "https://checker.otpcart.xyz/api/check-swiggy"
 
     try:
-        status1, data1 = check_single_pass(mobile, url, timeout=3)
+        status1, data1 = check_single_pass(clean, url, timeout=4)
     except Exception as e:
-        status1, data1 = "error", {"error": str(e), "status": "error"}
+        status1, data1 = "error", {"error": str(e), "status": "error", "mobile": clean}
 
     if status1 == "not_registered":
-        return False, {"status": "not_registered", "mobile": mobile}
-    data1.setdefault("status", status1)
-    return True, data1
+        return False, {"status": "not_registered", "mobile": clean}
+    elif status1 == "registered":
+        data1.setdefault("status", "registered")
+        data1.setdefault("mobile", clean)
+        return True, data1
+    else:
+        # Fail open on checker outage/unknown so account creation doesn't stall
+        data1.setdefault("status", status1)
+        data1.setdefault("mobile", clean)
+        return False, data1
 
 
 def make_provider(op):

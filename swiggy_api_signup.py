@@ -495,22 +495,27 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 ss.cancel_async(provider, o, rent_time=rent_time)
                 return None
 
-            # Mandatory Pre-Check: Only fresh/unregistered numbers proceed to OTP request
-            try:
-                registered, resp = ss.check_swiggy_registered(p, cfg)
-                status_str = str(resp.get("status", "unknown")).lower().strip()
-                slog("🔍 Pre-checking %s -> %s" % (p, status_str))
-            except Exception as e:
-                slog("pre-checker notice for %s: %s" % (p, e))
-                registered = True
-                status_str = "error"
+            # Pre-Check: Only fresh/unregistered numbers proceed to OTP request
+            precheck_on = (op.get("precheck_enabled", True) if isinstance(op, dict) else True)
+            if precheck_on:
+                try:
+                    registered, resp = ss.check_swiggy_registered(p, cfg)
+                    status_str = str(resp.get("status", "unknown")).lower().strip()
+                    slog("🔍 Pre-checking %s -> %s" % (p, status_str))
+                except Exception as e:
+                    slog("pre-checker notice for %s: %s" % (p, e))
+                    registered = False
+                    status_str = "error"
 
-            if registered or status_str != "not_registered":
-                slog("🚫 [PRE-CHECK REJECT] %s is '%s' (Already Registered on Swiggy) -> Cancelling order %s in background for refund & buying next..." % (p, status_str, o))
-                ss.cancel_async(provider, o, rent_time=rent_time)
-                continue
+                if registered or status_str == "registered":
+                    slog("🚫 [PRE-CHECK REJECT] %s is REGISTERED on Swiggy -> Cancelling order %s in background for refund & buying next..." % (p, o))
+                    ss.cancel_async(provider, o, rent_time=rent_time)
+                    continue
 
-            slog("✨ [PRE-CHECK PASS] %s is UNREGISTERED (Fresh). Proceeding to Swiggy OTP..." % p)
+                if status_str == "not_registered":
+                    slog("✨ [PRE-CHECK PASS] %s is UNREGISTERED (Fresh). Proceeding to Swiggy OTP..." % p)
+                else:
+                    slog("⚠️ [PRE-CHECK NOTICE] %s status is '%s'. Proceeding to Swiggy OTP..." % (p, status_str))
 
             if ss.is_cancelled():
                 ss.cancel_async(provider, o, rent_time=rent_time)
@@ -796,19 +801,26 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
                 break
 
             # Pre-check
-            try:
-                registered, resp = ss.check_swiggy_registered(p, cfg)
-                status_str = str(resp.get("status", "unknown")).lower().strip()
-            except Exception as e:
-                registered = True
-                status_str = "error"
+            precheck_on = (op.get("precheck_enabled", True) if isinstance(op, dict) else True)
+            if precheck_on:
+                try:
+                    registered, resp = ss.check_swiggy_registered(p, cfg)
+                    status_str = str(resp.get("status", "unknown")).lower().strip()
+                except Exception as e:
+                    registered = False
+                    status_str = "error"
 
-            if registered or status_str != "not_registered":
-                slog("🚫 [PRE-CHECK REJECT] %s is '%s' (Already Registered on Swiggy) -> Cancelling order %s in background for refund" % (p, status_str, o))
-                ss.cancel_async(provider, o, rent_time=rent_time)
-                continue
+                if registered or status_str == "registered":
+                    slog("🚫 [PRE-CHECK REJECT] %s is REGISTERED on Swiggy -> Cancelling order %s in background for refund" % (p, o))
+                    ss.cancel_async(provider, o, rent_time=rent_time)
+                    continue
 
-            slog("✨ [PRE-CHECK PASS] %s is UNREGISTERED (Fresh) -> Queued for Instant OTP!" % p)
+                if status_str == "not_registered":
+                    slog("✨ [PRE-CHECK PASS] %s is UNREGISTERED (Fresh) -> Queued for Instant OTP!" % p)
+                else:
+                    slog("⚠️ [PRE-CHECK NOTICE] %s status is '%s' -> Queued for Instant OTP!" % (p, status_str))
+            else:
+                slog("✨ [PRE-CHECK SKIPPED] %s queued for Instant OTP!" % p)
             fresh_queue.put((p, o, rent_time))
 
     # 2. Dispatcher Worker (Stage 2)
