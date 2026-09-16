@@ -854,11 +854,10 @@ def check_single_pass(mobile, url, timeout=4):
 
 def check_swiggy_registered(mobile, cfg):
     """
-    Fast Registration Checker with automatic sanitization and fail-safe fallback.
+    Fast Registration Checker with automatic retries and strict un-registered verification.
     Returns: (is_registered, response_dict)
     - If strictly 'not_registered' -> (False, {'status': 'not_registered', 'mobile': clean})
-    - If strictly 'registered' -> (True, {'status': 'registered', 'mobile': clean})
-    - If 'error' / 'unknown' -> (False, {'status': status, 'mobile': clean})
+    - If 'registered' / 'error' / 'unknown' -> (True, {'status': status, 'mobile': clean})
     """
     clean = re.sub(r"\D", "", str(mobile).strip())
     if clean.startswith("91") and len(clean) == 12:
@@ -869,22 +868,26 @@ def check_swiggy_registered(mobile, cfg):
     op = cfg.get("otp_provider") if isinstance(cfg.get("otp_provider"), dict) else {}
     url = cfg.get("check_url") or op.get("check_url") or "https://checker.otpcart.xyz/api/check-swiggy"
 
-    try:
-        status1, data1 = check_single_pass(clean, url, timeout=4)
-    except Exception as e:
-        status1, data1 = "error", {"error": str(e), "status": "error", "mobile": clean}
+    data1 = {"status": "unknown", "mobile": clean}
+    for attempt in range(1, 3):
+        try:
+            status1, data1 = check_single_pass(clean, url, timeout=5)
+            if status1 == "not_registered":
+                return False, {"status": "not_registered", "mobile": clean}
+            elif status1 == "registered":
+                data1.setdefault("status", "registered")
+                data1.setdefault("mobile", clean)
+                return True, data1
+            else:
+                data1.setdefault("status", status1)
+                data1.setdefault("mobile", clean)
+        except Exception as e:
+            status1, data1 = "error", {"error": str(e), "status": "error", "mobile": clean}
+        if attempt < 2:
+            time.sleep(0.5)
 
-    if status1 == "not_registered":
-        return False, {"status": "not_registered", "mobile": clean}
-    elif status1 == "registered":
-        data1.setdefault("status", "registered")
-        data1.setdefault("mobile", clean)
-        return True, data1
-    else:
-        # Fail open on checker outage/unknown so account creation doesn't stall
-        data1.setdefault("status", status1)
-        data1.setdefault("mobile", clean)
-        return False, data1
+    # Fail closed: If not strictly confirmed 'not_registered', treat as registered/unsafe
+    return True, data1
 
 
 def make_provider(op):
