@@ -415,10 +415,40 @@ def create_accounts(chat_id, count, bot):
                     if created + len(futs) < count and not (ss.is_cancelled() or RUNNING["cancel"]):
                         futs.add(ex.submit(api.create_api_account, cfg))
 
-        RUNNING["done"] = count
-        safe_send_message(bot, chat_id, f"🎉 Done! Created {created}/{count} account(s) successfully.", parse_mode=None)
+            # CAPTURE & DELIVER ALL REMAINING IN-FLIGHT ACCOUNTS (Zero accounts dropped!)
+            if futs and not (ss.is_cancelled() or RUNNING["cancel"]):
+                done_extra, remaining_pending = concurrent.futures.wait(futs, timeout=30)
+                for f in done_extra:
+                    try:
+                        acct = f.result()
+                    except Exception as e:
+                        log("In-flight extra account note: %s" % e)
+                        acct = None
+
+                    if acct:
+                        acct = ensure_account_fields(acct)
+                        try:
+                            ok, live_acct = api.verify_session_live(acct)
+                            if ok and live_acct:
+                                acct = live_acct
+                        except Exception:
+                            pass
+
+                        created += 1
+                        newly_created_accounts.append(acct)
+
+                        # Send extra verified account JSON directly to chat
+                        send_account_json(chat_id, acct, bot)
+                        safe_send_message(bot, chat_id, f"🎁 Extra/Bonus Account {created} Ready: +91 {acct.get('mobile')}", parse_mode=None)
+
+                        if len(newly_created_accounts) % 10 == 0:
+                            batch_slice = newly_created_accounts[-10:]
+                            send_batch_zip(chat_id, batch_slice, bot, batch_title="10-Pack")
+
+        RUNNING["done"] = created
+        safe_send_message(bot, chat_id, f"🎉 Done! Created & delivered {created} account(s) total.", parse_mode=None)
         if len(newly_created_accounts) >= 2:
-            send_batch_zip(chat_id, newly_created_accounts, bot, batch_title="All Created Accounts")
+            send_batch_zip(chat_id, newly_created_accounts, bot, batch_title=f"All {len(newly_created_accounts)} Created Accounts")
 
     except Exception as e:
         log(f"Fatal in create_accounts: {e}")
@@ -521,21 +551,21 @@ def register_handlers(bot, cfg):
     def cmd_zip(m):
         if not is_authorized(m.chat.id, cfg, bot, m):
             return
-        parts = (m.text or "").split()
-        n = 10
-        if len(parts) > 1:
-            try:
-                n = int(parts[1])
-            except Exception:
-                n = 10
-
         accs = ss.load_accounts()
         if not accs:
             bot.reply_to(m, "No accounts saved yet.")
             return
 
-        target_accs = accs[-n:]
-        send_batch_zip(m.chat.id, target_accs, bot, batch_title=f"Latest {len(target_accs)} Accounts")
+        parts = (m.text or "").split()
+        n = len(accs)
+        if len(parts) > 1:
+            try:
+                n = int(parts[1])
+            except Exception:
+                n = len(accs)
+
+        target_accs = accs[-n:] if n < len(accs) else accs
+        send_batch_zip(m.chat.id, target_accs, bot, batch_title=f"Accounts Archive ({len(target_accs)} accounts)")
 
     @bot.message_handler(commands=["check", "clean"])
     def cmd_check(m):
