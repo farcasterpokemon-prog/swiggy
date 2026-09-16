@@ -15,6 +15,7 @@
     "refer_code": "",
     "apply_referral": false,
     "auto_random": true,
+    "only_fresh": true,
     "otp_source": "provider",
     "otp": "",
     "otp_timeout_sec": 120,
