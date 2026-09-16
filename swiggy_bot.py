@@ -313,7 +313,7 @@ def create_accounts(chat_id, count, bot):
     MILESTONE_KEYWORDS = [
         "Bought number", "PRE-CHECK PASS", "PRE-CHECK REJECT", "Requesting Swiggy OTP",
         "Waiting up to 2 minutes", "OTP RECEIVED", "ACCOUNT LOGIN VERIFIED",
-        "FRESH NUMBER CONFIRMED", "Swiggy rejected OTP", "Starting", "Done!", "Notice"
+        "FRESH NUMBER CONFIRMED", "OLD ACCOUNT REJECTED", "Swiggy rejected OTP", "Starting", "Done!", "Notice"
     ]
     IGNORE_KEYWORDS = [
         "waiting for OTP from provider", "provider fetch notice", "requested OTP resend",
