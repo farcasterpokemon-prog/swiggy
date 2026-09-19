@@ -530,7 +530,7 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
 
             tid0 = data.get("tid", "")
             sid0 = data.get("sid", "")
-            slog("[%s] OTP requested successfully. Waiting up to 2 minutes for SMS..." % p)
+            slog("[%s] OTP requested successfully. Waiting up to 50s for SMS..." % p)
 
             otp, _s, _r = ss.get_otp(None, provider, op, p, o, cfg["signup"])
             if not otp:
@@ -679,9 +679,9 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
 
     op = cfg.get("otp_provider") or {}
     provider_type = getattr(provider, "cfg", {}).get("type", "nexnum")
-    max_wait_sec = float(op.get("max_wait_sec", 120))
+    max_wait_sec = float(op.get("max_wait_sec", 50))
     poll_interval = float(op.get("poll_interval_sec", 1.2))
-    resend_after_sec = float(op.get("resend_after_sec", 60))
+    resend_after_sec = float(op.get("resend_after_sec", 999))
 
     cfg_workers = cfg.get("workers") or op.get("workers") or 50
     total_workers = min(max(int(cfg_workers), 10), 100)
