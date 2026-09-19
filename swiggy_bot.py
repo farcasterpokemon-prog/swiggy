@@ -517,6 +517,7 @@ def register_handlers(bot, cfg):
             "/proxy on|off - enable or disable proxy\n"
             "/setproxy <url> - configure new proxy URL\n"
             "/search <number/ID> - search account JSON\n"
+            "/fresh - 🎁 download ZIP of all fresh unused accounts\n"
             "/zip [N] - download ZIP of latest N accounts\n"
             "/check - check all accounts and get ZIP of active ones\n"
             "/clean - remove expired accounts from database\n"
@@ -524,6 +525,41 @@ def register_handlers(bot, cfg):
             "/account N - get JSON for account N\n\n"
             "💡 Tip: Send any mobile number directly in chat to get its JSON!",
             reply_markup=get_control_keyboard(),
+        )
+
+    @bot.message_handler(commands=["fresh", "freshzip", "new", "unused", "newaccounts"])
+    def cmd_fresh(m):
+        if not is_authorized(m.chat.id, cfg, bot, m):
+            return
+        accs = ss.load_accounts()
+        if not accs:
+            safe_reply(bot, m, "No accounts saved in database yet.")
+            return
+
+        safe_reply(bot, m, f"🔍 Filtering all fresh unused accounts from {len(accs)} total records...")
+
+        fresh_accs = []
+        for a in accs:
+            is_new = a.get("is_new_user")
+            # If is_new_user is True or True by default
+            if is_new is True or is_new is None:
+                fresh_accs.append(ensure_account_fields(a))
+
+        if not fresh_accs:
+            safe_reply(bot, m, "⚠️ No fresh unused accounts found in database.")
+            return
+
+        send_batch_zip(
+            m.chat.id,
+            fresh_accs,
+            bot,
+            batch_title=f"Fresh Unused Accounts ({len(fresh_accs)} accounts)",
+        )
+        safe_send_message(
+            bot,
+            m.chat.id,
+            f"✅ *Fresh Accounts ZIP Delivered!*\n• *Total Fresh Accounts:* `{len(fresh_accs)}`\n• All accounts are packaged with individual `.json` files.",
+            parse_mode="Markdown",
         )
 
     @bot.message_handler(commands=["create"])
