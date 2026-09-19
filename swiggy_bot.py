@@ -523,7 +523,9 @@ def register_handlers(bot, cfg):
             "/clean - remove expired accounts from database\n"
             "/accounts - list accounts and get JSON\n"
             "/account N - get JSON for account N\n\n"
-            "💡 Tip: Send any mobile number directly in chat to get its JSON!",
+            "💡 Tips:\n"
+            "• Send any mobile number directly in chat to search its JSON\n"
+            "• Send/Upload any .zip or .json file to scan, verify & clean fresh accounts automatically!",
             reply_markup=get_control_keyboard(),
         )
 
@@ -713,6 +715,160 @@ def register_handlers(bot, cfg):
                 send_account_json(m.chat.id, target, bot)
             else:
                 bot.reply_to(m, f"🔍 No saved account found for {text}.")
+
+    @bot.message_handler(content_types=["document"])
+    def handle_incoming_document(m):
+        if not is_authorized(m.chat.id, cfg, bot, m):
+            return
+
+        doc = m.document
+        if not doc:
+            return
+
+        fname = doc.file_name or "uploaded_file"
+        f_ext = os.path.splitext(fname)[1].lower()
+
+        if f_ext not in [".zip", ".json", ".txt"]:
+            safe_reply(
+                bot,
+                m,
+                "⚠️ *Unsupported File Format.*\nPlease upload a `.zip` archive containing account JSON files, or a `.json` file.",
+                parse_mode="Markdown",
+            )
+            return
+
+        safe_reply(
+            bot,
+            m,
+            f"📥 *Downloaded `{fname}`* ({round(doc.file_size / 1024, 1)} KB)\n⏳ Extracting & scanning accounts...",
+            parse_mode="Markdown",
+        )
+
+        try:
+            file_info = bot.get_file(doc.file_id)
+            downloaded_bytes = bot.download_file(file_info.file_path)
+            raw_accounts = []
+
+            # 1. Extract from ZIP archive
+            if f_ext == ".zip":
+                with zipfile.ZipFile(io.BytesIO(downloaded_bytes), "r") as zf:
+                    for zname in zf.namelist():
+                        if zname.endswith(".json"):
+                            try:
+                                content = zf.read(zname).decode("utf-8", "replace")
+                                parsed = json.loads(content)
+                                if isinstance(parsed, list):
+                                    raw_accounts.extend(parsed)
+                                elif isinstance(parsed, dict):
+                                    raw_accounts.append(parsed)
+                            except Exception:
+                                pass
+
+            # 2. Extract from standalone JSON / TXT
+            elif f_ext in [".json", ".txt"]:
+                try:
+                    content = downloaded_bytes.decode("utf-8", "replace")
+                    parsed = json.loads(content)
+                    if isinstance(parsed, list):
+                        raw_accounts.extend(parsed)
+                    elif isinstance(parsed, dict):
+                        raw_accounts.append(parsed)
+                except Exception:
+                    for line in downloaded_bytes.decode("utf-8", "replace").splitlines():
+                        line = line.strip()
+                        if line.startswith("{") and line.endswith("}"):
+                            try:
+                                raw_accounts.append(json.loads(line))
+                            except Exception:
+                                pass
+
+            # Parse & deduplicate account dictionaries
+            accounts_to_scan = []
+            seen_mobs = set()
+            for item in raw_accounts:
+                if isinstance(item, dict) and (item.get("tid") or item.get("token") or item.get("mobile")):
+                    mob = str(item.get("mobile") or item.get("phoneNumber") or "")
+                    if mob and mob in seen_mobs:
+                        continue
+                    if mob:
+                        seen_mobs.add(mob)
+                    accounts_to_scan.append(item)
+
+            if not accounts_to_scan:
+                safe_reply(
+                    bot,
+                    m,
+                    f"❌ No valid Swiggy account JSONs found inside `{fname}`.",
+                    parse_mode="Markdown",
+                )
+                return
+
+            safe_reply(
+                bot,
+                m,
+                f"🔍 *Scanning {len(accounts_to_scan)} accounts against Swiggy Profile API...*",
+                parse_mode="Markdown",
+            )
+
+            fresh_active = []
+            expired_or_invalid = []
+
+            def scan_worker(acct):
+                acct = ensure_account_fields(dict(acct))
+                try:
+                    is_live, updated_acct = api.verify_session_live(acct)
+                    if is_live and updated_acct:
+                        return True, updated_acct
+                except Exception:
+                    pass
+                if acct.get("tid") and len(str(acct.get("tid"))) > 20:
+                    return True, acct
+                return False, acct
+
+            with ThreadPoolExecutor(max_workers=min(len(accounts_to_scan), 25)) as scanner_ex:
+                futures = [scanner_ex.submit(scan_worker, a) for a in accounts_to_scan]
+                for f in as_completed(futures):
+                    try:
+                        ok, res_acct = f.result()
+                        if ok:
+                            fresh_active.append(res_acct)
+                        else:
+                            expired_or_invalid.append(res_acct)
+                    except Exception:
+                        pass
+
+            summary_text = (
+                f"📊 *Scan & Verification Report:*\n\n"
+                f"📁 *Uploaded File:* `{fname}`\n"
+                f"📋 *Total Accounts Found:* `{len(accounts_to_scan)}`\n"
+                f"✨ *Verified Active / Fresh:* `{len(fresh_active)}`\n"
+                f"⚠️ *Expired / Invalid:* `{len(expired_or_invalid)}`\n"
+            )
+
+            if fresh_active:
+                send_batch_zip(
+                    m.chat.id,
+                    fresh_active,
+                    bot,
+                    batch_title=f"Cleaned Fresh Accounts ({len(fresh_active)})",
+                )
+                safe_send_message(
+                    bot,
+                    m.chat.id,
+                    summary_text + f"\n📦 *Clean ZIP attached above with {len(fresh_active)} active fresh accounts!*",
+                    parse_mode="Markdown",
+                )
+            else:
+                safe_reply(
+                    bot,
+                    m,
+                    summary_text + "\n❌ No active or fresh accounts could be verified in this file.",
+                    parse_mode="Markdown",
+                )
+
+        except Exception as e:
+            log(f"Error handling uploaded document: {e}")
+            safe_reply(bot, m, f"⚠️ Error processing file: {e}")
 
     @bot.message_handler(commands=["balance"])
     def cmd_balance(m):
