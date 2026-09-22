@@ -1,0 +1,16 @@
+name: 24/7 Render Keep Alive
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Swiggy Telegram Bot on Render
+        run: |
+          echo "Pinging Swiggy Bot on Render to keep it awake 24/7..."
+          curl -s -o /dev/null -w "HTTP: %{http_code}
+" https://swiggy-telegram-bot.onrender.com
