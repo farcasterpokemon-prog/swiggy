@@ -188,10 +188,6 @@ def ensure_account_fields(acct):
             acct.get("tid", ""), acct.get("sid", ""), acct.get("deviceId", "")
         )
 
-    # 4. Live profile refresh: fetch fresh session status and tokens
-    ok, updated = api.verify_session_live(acct)
-    if ok and updated:
-        return updated
     return acct
 
 
@@ -333,11 +329,11 @@ def create_accounts(chat_id, count, bot):
                     break
                 continue
 
-            # Strict 1.2s delay between messages to stay comfortably within Telegram rate limits
+            # Faster milestone delivery
             now = time.time()
             gap = now - last_sent
-            if gap < 1.2:
-                time.sleep(1.2 - gap)
+            if gap < 0.5:
+                time.sleep(0.5 - gap)
 
             try:
                 res = safe_send_message(bot, chat_id, msg_item, parse_mode=None)
@@ -373,7 +369,7 @@ def create_accounts(chat_id, count, bot):
         safe_send_message(
             bot,
             chat_id,
-            f"🚀 Starting {count} parallel accounts creation!\n• Spawning {workers} concurrent worker(s) buying numbers, pre-checking, and generating accounts in parallel.",
+            f"🚀 Starting {count} parallel accounts creation!\n• Spawning {workers} concurrent worker(s) with high speed.",
             parse_mode=None,
         )
 
@@ -392,13 +388,6 @@ def create_accounts(chat_id, count, bot):
 
                     if acct:
                         acct = ensure_account_fields(acct)
-                        try:
-                            ok, live_acct = api.verify_session_live(acct)
-                            if ok and live_acct:
-                                acct = live_acct
-                        except Exception:
-                            pass
-
                         created += 1
                         newly_created_accounts.append(acct)
 
@@ -427,13 +416,6 @@ def create_accounts(chat_id, count, bot):
 
                     if acct:
                         acct = ensure_account_fields(acct)
-                        try:
-                            ok, live_acct = api.verify_session_live(acct)
-                            if ok and live_acct:
-                                acct = live_acct
-                        except Exception:
-                            pass
-
                         created += 1
                         newly_created_accounts.append(acct)
 
