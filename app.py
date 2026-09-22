@@ -116,8 +116,8 @@ def setup_webhook():
 
 
 def keep_alive_worker():
-    """Pings the public web service every 2 minutes to keep Render container awake."""
-    time.sleep(20)
+    """Pings the public web service and enforces Telegram webhook continuously."""
+    time.sleep(10)
     while True:
         try:
             req = urllib.request.Request(
@@ -128,7 +128,24 @@ def keep_alive_worker():
                 logger.info(f"Keep-alive ping sent to {SERVICE_URL} (HTTP {resp.getcode()})")
         except Exception as e:
             logger.debug(f"Keep-alive ping notice: {e}")
-        time.sleep(120)  # Ping every 2 minutes
+
+        # Webhook Auto-Heal: Check and enforce Telegram webhook on every keepalive cycle
+        try:
+            current_info = bot.get_webhook_info()
+            if current_info.url != WEBHOOK_URL:
+                logger.warning(f"Webhook URL deviated to '{current_info.url}'. Auto-restoring to {WEBHOOK_URL}...")
+                try:
+                    bot.remove_webhook()
+                except Exception:
+                    pass
+                time.sleep(0.5)
+                success = bot.set_webhook(url=WEBHOOK_URL, max_connections=40, drop_pending_updates=False)
+                if success:
+                    logger.info(f"Telegram Webhook successfully restored to {WEBHOOK_URL}")
+        except Exception as e:
+            logger.debug(f"Webhook check notice: {e}")
+
+        time.sleep(60)  # Ping and enforce every 60 seconds
 
 
 if __name__ == "__main__":
