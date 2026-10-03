@@ -364,12 +364,62 @@ def create_accounts(chat_id, count, bot):
     newly_created_accounts = []
     cfg = ss.load_config(ss.CONFIG_PATH)
 
+    # 1. Verify Active Provider Balance
+    op = cfg.get("otp_provider") or {}
+    prov_name = str(op.get("type", "unknown")).upper()
+    bal = ss.get_provider_balance(op)
+    bal_str = str(bal).strip()
+
+    is_bal_zero = False
+    try:
+        val = float(re.sub(r"[^\d.]", "", bal_str) or 0)
+        if val <= 0 and any(err in bal_str.lower() for err in ["0", "0.0", "bad_key", "error", "invalid", "no_key", "no_numbers", "access_balance:0"]):
+            is_bal_zero = True
+    except Exception:
+        is_bal_zero = True
+
+    if is_bal_zero or "BAD_KEY" in bal_str.upper() or "INVALID" in bal_str.upper():
+        # Check if uotp preset is available with balance
+        uotp_p = cfg.get("otp_presets", {}).get("uotp", {})
+        uotp_bal = ss.get_provider_balance(uotp_p)
+        try:
+            uval = float(re.sub(r"[^\d.]", "", str(uotp_bal)) or 0)
+        except Exception:
+            uval = 0
+
+        if uval > 0:
+            safe_send_message(
+                bot,
+                chat_id,
+                f"⚠️ *{prov_name}* balance is `{bal_str}`.\n🔄 *Auto-switching to UOTP* (Live Balance: `{uotp_bal}`)...",
+                parse_mode="Markdown",
+            )
+            op.update(uotp_p)
+            cfg["otp_provider"] = op
+            with open(ss.CONFIG_PATH, "w", encoding="utf-8") as fh:
+                json.dump(cfg, fh, indent=2)
+        else:
+            safe_send_message(
+                bot,
+                chat_id,
+                f"❌ *Account Creation Paused!*\n\n"
+                f"• *Active Provider:* `{prov_name}`\n"
+                f"• *Status / Balance:* `{bal_str}`\n\n"
+                f"💡 *Fix:* Please recharge your provider balance or update your API key:\n"
+                f"• Use `/setkey <new_api_key>`\n"
+                f"• Or use `/setprovider uotp` to switch provider.",
+                parse_mode="Markdown",
+                reply_markup=get_control_keyboard(),
+            )
+            RUNNING["active"] = False
+            return
+
     try:
         workers = min(count, 100)
         safe_send_message(
             bot,
             chat_id,
-            f"🚀 Starting {count} parallel accounts creation!\n• Spawning {workers} concurrent worker(s) with high speed.",
+            f"🚀 Starting {count} parallel accounts creation!\n• Spawning {workers} concurrent worker(s) via {op.get('type', 'OTP').upper()}.",
             parse_mode=None,
         )
 
