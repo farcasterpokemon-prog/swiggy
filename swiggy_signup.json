@@ -81,7 +81,7 @@
     "tiger": {
       "type": "tiger",
       "api_key": "",
-      "service": "jx",
+      "service": "cw",
       "country": 22,
       "base_url": "https://api.tiger-sms.com/stubs/handler_api.php"
     },
