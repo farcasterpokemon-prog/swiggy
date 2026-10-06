@@ -994,8 +994,12 @@ def register_handlers(bot, cfg):
                     break
 
         op = cfg_data.get("otp_provider") or {}
+        existing_key = op.get("api_key", "")
         if matched_preset:
-            op.update(matched_preset)
+            for k, v in matched_preset.items():
+                if k == "api_key" and not v and existing_key:
+                    continue  # Keep existing key if preset is empty
+                op[k] = v
         else:
             op["type"] = name
 
@@ -1019,19 +1023,30 @@ def register_handlers(bot, cfg):
     def cmd_setkey(m):
         if not is_authorized(m.chat.id, cfg, bot, m):
             return
-        parts = (m.text or "").split(maxsplit=1)
+        parts = (m.text or "").split(maxsplit=2)
         if len(parts) < 2:
-            safe_reply(bot, m, "Usage: `/setkey <api_key>`", parse_mode="Markdown")
+            safe_reply(bot, m, "Usage: `/setkey <api_key>` or `/setkey <provider> <api_key>`", parse_mode="Markdown")
             return
-        key = parts[1].strip()
-        cfg_data = ss.load_config(ss.CONFIG_PATH)
-        op = cfg_data.get("otp_provider") or {}
-        op["api_key"] = key
-        ptype = str(op.get("type", "nexnum")).lower()
 
+        cfg_data = ss.load_config(ss.CONFIG_PATH)
         presets = cfg_data.get("otp_presets") or {}
-        if ptype in presets:
-            presets[ptype]["api_key"] = key
+        op = cfg_data.get("otp_provider") or {}
+
+        # Allow syntax: /setkey tiger abc12345 OR /setkey abc12345
+        if len(parts) >= 3 and parts[1].lower() in presets:
+            target_prov = parts[1].lower().strip()
+            key = parts[2].strip()
+            if target_prov in presets:
+                presets[target_prov]["api_key"] = key
+            if str(op.get("type", "")).lower() == target_prov:
+                op["api_key"] = key
+            ptype = target_prov
+        else:
+            key = parts[1].strip()
+            op["api_key"] = key
+            ptype = str(op.get("type", "unknown")).lower()
+            if ptype in presets:
+                presets[ptype]["api_key"] = key
 
         cfg_data["otp_provider"] = op
         cfg_data["otp_presets"] = presets
@@ -1041,7 +1056,7 @@ def register_handlers(bot, cfg):
 
         safe_reply(bot, m, f"🔑 API Key updated for *{ptype.upper()}*! Testing balance...", parse_mode="Markdown")
         bal = ss.get_provider_balance(op)
-        safe_send_message(bot, m.chat.id, f"💳 Live Balance: `{bal}`", parse_mode="Markdown")
+        safe_send_message(bot, m.chat.id, f"💳 Live Balance for *{ptype.upper()}*: `{bal}`", parse_mode="Markdown")
 
     @bot.message_handler(commands=["setprice", "price", "maxprice"])
     def cmd_setprice(m):
