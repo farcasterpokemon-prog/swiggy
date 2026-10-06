@@ -642,7 +642,34 @@ class TigerProvider(SmsActivateBaseProvider):
 
     def __init__(self, cfg):
         super().__init__(cfg)
-        self.service = cfg.get("service", "jx")
+        self.service = cfg.get("service", "cw")
+        self.services = [self.service, "cw", "swiggy", "jx", "hp"]
+
+    def get_number(self):
+        last_err = None
+        for svc in list(dict.fromkeys(self.services)):
+            params = {"service": svc, "country": self.country}
+            data = self._call("getNumber", **params)
+            raw = data.get("_raw", "")
+            if isinstance(raw, str) and raw.startswith("ACCESS_NUMBER"):
+                parts = raw.split(":")
+                if len(parts) >= 3:
+                    order_id = parts[1]
+                    phone = parts[2]
+                    if phone.startswith(self.phone_code):
+                        phone = phone[len(self.phone_code):]
+                    return str(phone), str(order_id)
+            if isinstance(data, dict) and (data.get("activationId") or data.get("id")):
+                order_id = str(data.get("activationId") or data.get("id"))
+                number = str(data.get("phoneNumber") or data.get("phone") or "")
+                if number.startswith(self.phone_code):
+                    number = number[len(self.phone_code):]
+                return number, order_id
+            last_err = raw or data
+            if "NO_NUMBERS" in str(last_err):
+                continue
+            break
+        raise RuntimeError(f"Tiger SMS getNumber failed: {last_err}")
 
 
 class SmsActivateProvider(SmsActivateBaseProvider):
