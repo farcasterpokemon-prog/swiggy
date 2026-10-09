@@ -516,8 +516,13 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                     slog("🚫 [Already Registered] %s was previously used on Swiggy. Cancelling order %s for refund & renting fresh number..." % (p, o))
                     ss.cancel_async(provider, o, rent_time=rent_time)
                     continue
-                elif status_str == "checker_fallback":
-                    slog("⚠️ [Checker Server Busy] Proceeding to Swiggy OTP for %s (live freshness will be verified on login)..." % p)
+                elif status_str in ["checker_fallback", "error", "timeout", "busy", "unknown"]:
+                    slog("⏳ [Checker Busy / Down] 3rd-party checker server is busy or timed out. Pausing for 30 seconds before proceeding...")
+                    if ss.cancel_sleep(30):
+                        slog("[%s] Cancelled during 30s pause." % p)
+                        ss.cancel_async(provider, o, rent_time=rent_time)
+                        return None
+                    slog("✨ [30s Pause Complete] Proceeding to Swiggy OTP for %s (live freshness will be verified on login)..." % p)
                 else:
                     slog("✨ [100%% Fresh Number Confirmed] %s is brand new! Requesting Swiggy OTP..." % p)
 
