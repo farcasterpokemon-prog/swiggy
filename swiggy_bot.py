@@ -354,18 +354,24 @@ def create_accounts(chat_id, count, bot):
     log_queue = queue.Queue(maxsize=100)
     stop_logger = threading.Event()
 
-    # Log filter: deliver all meaningful progress updates in real-time
+    # Log filter: only stream number buy and check status milestones to Telegram
     MILESTONE_KEYWORDS = [
-        "Bought number", "Rented", "PRE-CHECK", "PRE-CHECK PASS", "PRE-CHECK REJECT",
-        "Requesting Swiggy OTP", "Waiting", "OTP requested", "OTP RECEIVED", "OTP timeout",
-        "ACCOUNT LOGIN VERIFIED", "FRESH NUMBER CONFIRMED", "OLD ACCOUNT REJECTED",
-        "Submitting name", "Swiggy rejected OTP", "Starting", "Done!", "Notice",
-        "SUCCESS", "Account Created", "Auto-switching", "Error", "Pause", "Pausing",
-        "Checker", "Busy", "Down", "Ready:"
+        "Bought number",
+        "Checking",
+        "Fresh Number Confirmed",
+        "Already Registered",
+        "OLD ACCOUNT REJECTED",
+        "Checker Busy",
+        "Pausing for 30 seconds",
+        "INSUFFICIENT FUNDS",
+        "Auto-switching",
     ]
     IGNORE_KEYWORDS = [
         "save_active_orders", "load_active_orders", "fetch_profile_customer_id",
-        "Unregistered active rental", "registered_at", "verify_session_live notice"
+        "Unregistered active rental", "registered_at", "verify_session_live notice",
+        "Requesting Swiggy OTP", "Waiting", "OTP requested", "OTP RECEIVED", "OTP timeout",
+        "verify response", "proceeding to finalize", "Submitting name", "Swiggy rejected OTP",
+        "sms_otp failed", "sms_otp error", "Rent attempt", "Notice", "Ready:"
     ]
 
     def log_sender_thread():
@@ -397,7 +403,7 @@ def create_accounts(chat_id, count, bot):
         if not msg:
             return
         m_str = str(msg).strip()
-        if any(ign in m_str for ign in IGNORE_KEYWORDS):
+        if any(ign.lower() in m_str.lower() for ign in IGNORE_KEYWORDS):
             return
         if any(kw.lower() in m_str.lower() for kw in MILESTONE_KEYWORDS):
             try:
@@ -467,7 +473,7 @@ def create_accounts(chat_id, count, bot):
         safe_send_message(
             bot,
             chat_id,
-            f"🚀 Starting {count} parallel accounts creation!\n• Spawning {workers} concurrent worker(s) via {op.get('type', 'OTP').upper()}.",
+            f"🚀 Starting creation of {count} account(s) via {op.get('type', 'OTP').upper()}...",
             parse_mode=None,
         )
 
@@ -491,10 +497,9 @@ def create_accounts(chat_id, count, bot):
 
                         # Send verified account JSON directly to chat
                         send_account_json(chat_id, acct, bot)
-                        safe_send_message(bot, chat_id, f"✅ Account {created}/{count} Ready: +91 {acct.get('mobile')}", parse_mode=None)
 
                         # Send ZIP batch every 10 accounts if requested in larger runs
-                        if len(newly_created_accounts) % 10 == 0:
+                        if len(newly_created_accounts) % 10 == 0 and count > 10:
                             batch_slice = newly_created_accounts[-10:]
                             send_batch_zip(chat_id, batch_slice, bot, batch_title="10-Pack")
 
@@ -519,16 +524,16 @@ def create_accounts(chat_id, count, bot):
 
                         # Send extra verified account JSON directly to chat
                         send_account_json(chat_id, acct, bot)
-                        safe_send_message(bot, chat_id, f"🎁 Extra/Bonus Account {created} Ready: +91 {acct.get('mobile')}", parse_mode=None)
 
-                        if len(newly_created_accounts) % 10 == 0:
+                        if len(newly_created_accounts) % 10 == 0 and count > 10:
                             batch_slice = newly_created_accounts[-10:]
                             send_batch_zip(chat_id, batch_slice, bot, batch_title="10-Pack")
 
         RUNNING["done"] = created
-        safe_send_message(bot, chat_id, f"🎉 Done! Created & delivered {created} account(s) total.", parse_mode=None)
-        if len(newly_created_accounts) >= 2:
-            send_batch_zip(chat_id, newly_created_accounts, bot, batch_title=f"All {len(newly_created_accounts)} Created Accounts")
+        if count > 1:
+            safe_send_message(bot, chat_id, f"🎉 Done! Created {created}/{count} accounts total.", parse_mode=None)
+            if len(newly_created_accounts) >= 2:
+                send_batch_zip(chat_id, newly_created_accounts, bot, batch_title=f"All {len(newly_created_accounts)} Created Accounts")
 
     except Exception as e:
         log(f"Fatal in create_accounts: {e}")
