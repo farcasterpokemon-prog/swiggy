@@ -373,7 +373,7 @@ def create_accounts(chat_id, count, bot):
     is_bal_zero = False
     try:
         val = float(re.sub(r"[^\d.]", "", bal_str) or 0)
-        if val <= 0 and any(err in bal_str.lower() for err in ["0", "0.0", "bad_key", "error", "invalid", "no_key", "no_numbers", "access_balance:0"]):
+        if val < 0.08 or any(err in bal_str.lower() for err in ["bad_key", "error", "invalid", "no_key", "no_numbers", "access_balance:0"]):
             is_bal_zero = True
     except Exception:
         is_bal_zero = True
