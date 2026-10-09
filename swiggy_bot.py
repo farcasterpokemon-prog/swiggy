@@ -54,6 +54,8 @@ def safe_reply(bot, msg, text, parse_mode="Markdown", reply_markup=None):
     if not bot or not msg:
         return None
     try:
+        if len(text) > 4000:
+            text = text[:4000]
         return bot.reply_to(msg, text, parse_mode=parse_mode, reply_markup=reply_markup)
     except telebot.apihelper.ApiTelegramException as e:
         if e.error_code == 429:
@@ -70,22 +72,35 @@ def safe_reply(bot, msg, text, parse_mode="Markdown", reply_markup=None):
 
 
 def safe_send_message(bot, chat_id, text, parse_mode="Markdown", reply_markup=None):
-    if not bot:
+    if not bot or not chat_id or not text:
         return None
-    try:
-        return bot.send_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
-    except telebot.apihelper.ApiTelegramException as e:
-        if e.error_code == 429:
-            log(f"safe_send_message 429 rate limit: {e.description}")
-            return None
+    text_str = str(text)
+    # Telegram max message length is 4096. Split into chunks if needed.
+    chunks = [text_str[i:i + 4000] for i in range(0, len(text_str), 4000)] if len(text_str) > 4000 else [text_str]
+    last_res = None
+    for idx, chunk in enumerate(chunks):
+        markup = reply_markup if (idx == len(chunks) - 1) else None
         try:
-            return bot.send_message(chat_id, text, reply_markup=reply_markup)
-        except Exception as e2:
-            log(f"safe_send_message fallback failed: {e2}")
-            return None
-    except Exception as e:
-        log(f"safe_send_message failed: {e}")
-        return None
+            last_res = bot.send_message(chat_id, chunk, parse_mode=parse_mode, reply_markup=markup)
+        except telebot.apihelper.ApiTelegramException as e:
+            if e.error_code == 429:
+                log(f"safe_send_message 429 rate limit: {e.description}")
+                time.sleep(1.0)
+                try:
+                    last_res = bot.send_message(chat_id, chunk, parse_mode=None, reply_markup=markup)
+                except Exception:
+                    pass
+            else:
+                try:
+                    last_res = bot.send_message(chat_id, chunk, parse_mode=None, reply_markup=markup)
+                except Exception as e2:
+                    log(f"safe_send_message plain fallback failed: {e2}")
+        except Exception as e:
+            try:
+                last_res = bot.send_message(chat_id, chunk, parse_mode=None, reply_markup=markup)
+            except Exception as e2:
+                log(f"safe_send_message fallback failed: {e2}")
+    return last_res
 
 
 def get_control_keyboard():
@@ -205,13 +220,20 @@ def send_account_json(chat_id, acct, bot):
         name = acct.get("userName") or acct.get("name") or "Swiggy User"
         cid = acct.get("customerId") or "?"
         token = acct.get("token") or "?"
+        tid = acct.get("tid") or ""
+        sid = acct.get("sid") or ""
+        dev_id = acct.get("deviceId") or ""
+
         msg_header = (
-            f"🎉 Account Created & Verified!\n"
+            f"🎉 Account Created & Verified!\n\n"
             f"📱 Mobile: +91 {mobile}\n"
             f"👤 Name: {name}\n"
             f"🆔 Customer ID: {cid}\n"
-            f"🔑 Token: {token}\n\n"
-            f"📋 Account JSON:\n{json_str}"
+            f"🔑 Token: {token}\n"
+            f"🍪 TID: {tid}\n"
+            f"📌 SID: {sid}\n"
+            f"📱 Device ID: {dev_id}\n\n"
+            f"📋 Complete Account JSON:\n{json_str}"
         )
         safe_send_message(bot, chat_id, msg_header, parse_mode=None)
 
@@ -305,18 +327,17 @@ def create_accounts(chat_id, count, bot):
     log_queue = queue.Queue(maxsize=100)
     stop_logger = threading.Event()
 
-    # Log filter: only deliver key milestone logs to Telegram chat, avoiding spam & 429
+    # Log filter: deliver all meaningful progress updates in real-time
     MILESTONE_KEYWORDS = [
-        "Bought number", "PRE-CHECK PASS", "PRE-CHECK REJECT", "Requesting Swiggy OTP",
-        "Waiting up to 2 minutes", "OTP RECEIVED", "ACCOUNT LOGIN VERIFIED",
-        "FRESH NUMBER CONFIRMED", "OLD ACCOUNT REJECTED", "Swiggy rejected OTP", "Starting", "Done!", "Notice"
+        "Bought number", "Rented", "PRE-CHECK", "PRE-CHECK PASS", "PRE-CHECK REJECT",
+        "Requesting Swiggy OTP", "Waiting", "OTP requested", "OTP RECEIVED", "OTP timeout",
+        "ACCOUNT LOGIN VERIFIED", "FRESH NUMBER CONFIRMED", "OLD ACCOUNT REJECTED",
+        "Submitting name", "Swiggy rejected OTP", "Starting", "Done!", "Notice",
+        "SUCCESS", "Account Created", "Auto-switching", "Error", "Pause", "Ready:"
     ]
     IGNORE_KEYWORDS = [
-        "waiting for OTP from provider", "provider fetch notice", "requested OTP resend",
-        "resend notice", "pre-checker notice", "Unregistered active rental",
-        "activation marked complete", "registered_at", "save_active_orders",
-        "load_active_orders", "fetch_profile_customer_id", "verify_session_live notice",
-        "Checking number", "proceeding to finalize"
+        "save_active_orders", "load_active_orders", "fetch_profile_customer_id",
+        "Unregistered active rental", "registered_at", "verify_session_live notice"
     ]
 
     def log_sender_thread():
@@ -329,11 +350,10 @@ def create_accounts(chat_id, count, bot):
                     break
                 continue
 
-            # Faster milestone delivery
             now = time.time()
             gap = now - last_sent
-            if gap < 0.5:
-                time.sleep(0.5 - gap)
+            if gap < 0.3:
+                time.sleep(0.3 - gap)
 
             try:
                 res = safe_send_message(bot, chat_id, msg_item, parse_mode=None)
@@ -351,7 +371,7 @@ def create_accounts(chat_id, count, bot):
         m_str = str(msg).strip()
         if any(ign in m_str for ign in IGNORE_KEYWORDS):
             return
-        if any(kw in m_str for kw in MILESTONE_KEYWORDS):
+        if any(kw.lower() in m_str.lower() for kw in MILESTONE_KEYWORDS):
             try:
                 log_queue.put_nowait(m_str)
             except queue.Full:
