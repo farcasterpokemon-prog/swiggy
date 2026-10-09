@@ -62,8 +62,8 @@ def safe_reply(bot, msg, text, parse_mode="Markdown", reply_markup=None):
         with OUTBOUND_LOCK:
             now = time.time()
             gap = now - LAST_MESSAGE_TIME
-            if gap < 1.1:
-                time.sleep(1.1 - gap)
+            if gap < 1.3:
+                time.sleep(1.3 - gap)
             LAST_MESSAGE_TIME = time.time()
 
         if len(text) > 4000:
@@ -95,8 +95,8 @@ def safe_send_message(bot, chat_id, text, parse_mode="Markdown", reply_markup=No
         with OUTBOUND_LOCK:
             now = time.time()
             gap = now - LAST_MESSAGE_TIME
-            if gap < 1.1:
-                time.sleep(1.1 - gap)
+            if gap < 1.3:
+                time.sleep(1.3 - gap)
             LAST_MESSAGE_TIME = time.time()
 
         for attempt in range(1, 3):
@@ -379,8 +379,8 @@ def create_accounts(chat_id, count, bot):
 
             now = time.time()
             gap = now - last_sent
-            if gap < 0.3:
-                time.sleep(0.3 - gap)
+            if gap < 1.2:
+                time.sleep(1.2 - gap)
 
             try:
                 res = safe_send_message(bot, chat_id, msg_item, parse_mode=None)
