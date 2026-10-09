@@ -50,10 +50,22 @@ def log(msg):
             pass
 
 
+OUTBOUND_LOCK = threading.Lock()
+LAST_MESSAGE_TIME = 0.0
+
+
 def safe_reply(bot, msg, text, parse_mode="Markdown", reply_markup=None):
+    global LAST_MESSAGE_TIME
     if not bot or not msg:
         return None
     try:
+        with OUTBOUND_LOCK:
+            now = time.time()
+            gap = now - LAST_MESSAGE_TIME
+            if gap < 1.1:
+                time.sleep(1.1 - gap)
+            LAST_MESSAGE_TIME = time.time()
+
         if len(text) > 4000:
             text = text[:4000]
         return bot.reply_to(msg, text, parse_mode=parse_mode, reply_markup=reply_markup)
@@ -72,34 +84,48 @@ def safe_reply(bot, msg, text, parse_mode="Markdown", reply_markup=None):
 
 
 def safe_send_message(bot, chat_id, text, parse_mode="Markdown", reply_markup=None):
+    global LAST_MESSAGE_TIME
     if not bot or not chat_id or not text:
         return None
     text_str = str(text)
-    # Telegram max message length is 4096. Split into chunks if needed.
     chunks = [text_str[i:i + 4000] for i in range(0, len(text_str), 4000)] if len(text_str) > 4000 else [text_str]
     last_res = None
     for idx, chunk in enumerate(chunks):
         markup = reply_markup if (idx == len(chunks) - 1) else None
-        try:
-            last_res = bot.send_message(chat_id, chunk, parse_mode=parse_mode, reply_markup=markup)
-        except telebot.apihelper.ApiTelegramException as e:
-            if e.error_code == 429:
-                log(f"safe_send_message 429 rate limit: {e.description}")
-                time.sleep(1.0)
-                try:
-                    last_res = bot.send_message(chat_id, chunk, parse_mode=None, reply_markup=markup)
-                except Exception:
-                    pass
-            else:
-                try:
-                    last_res = bot.send_message(chat_id, chunk, parse_mode=None, reply_markup=markup)
-                except Exception as e2:
-                    log(f"safe_send_message plain fallback failed: {e2}")
-        except Exception as e:
+        with OUTBOUND_LOCK:
+            now = time.time()
+            gap = now - LAST_MESSAGE_TIME
+            if gap < 1.1:
+                time.sleep(1.1 - gap)
+            LAST_MESSAGE_TIME = time.time()
+
+        for attempt in range(1, 3):
             try:
-                last_res = bot.send_message(chat_id, chunk, parse_mode=None, reply_markup=markup)
-            except Exception as e2:
-                log(f"safe_send_message fallback failed: {e2}")
+                last_res = bot.send_message(chat_id, chunk, parse_mode=parse_mode, reply_markup=markup)
+                break
+            except telebot.apihelper.ApiTelegramException as e:
+                if e.error_code == 429:
+                    retry_after = 2
+                    try:
+                        retry_after = int(e.result_json.get("parameters", {}).get("retry_after", 2))
+                    except Exception:
+                        pass
+                    log(f"safe_send_message 429 flood wait: {retry_after}s")
+                    time.sleep(min(retry_after, 4))
+                else:
+                    try:
+                        last_res = bot.send_message(chat_id, chunk, parse_mode=None, reply_markup=markup)
+                        break
+                    except Exception as e2:
+                        log(f"safe_send_message plain fallback failed: {e2}")
+                        break
+            except Exception as e:
+                try:
+                    last_res = bot.send_message(chat_id, chunk, parse_mode=None, reply_markup=markup)
+                    break
+                except Exception as e2:
+                    log(f"safe_send_message fallback failed: {e2}")
+                    break
     return last_res
 
 
