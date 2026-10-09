@@ -12,5 +12,4 @@ jobs:
       - name: Ping Swiggy Telegram Bot on Render
         run: |
           echo "Pinging Swiggy Bot on Render to keep it awake 24/7..."
-          curl -s -o /dev/null -w "HTTP: %{http_code}
-" https://swiggy-telegram-bot.onrender.com
+          curl -s -f "https://swiggy-telegram-bot.onrender.com" || true
