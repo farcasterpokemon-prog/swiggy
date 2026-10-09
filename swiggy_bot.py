@@ -1462,10 +1462,40 @@ def register_handlers(bot, cfg):
 
         bot.reply_to(m, f"🔄 Proxy updated! Testing `{new_url[:30]}...`", parse_mode="Markdown")
         ip_info = api.get_current_ip(new_url)
-        ip = ip_info.get("ip") or ip_info.get("query") or "unknown"
-        country = ip_info.get("country") or ip_info.get("countryCode") or ""
-        city = ip_info.get("city") or ""
         bot.send_message(m.chat.id, f"✅ Proxy is LIVE!\n🌍 Routed IP: `{ip}`\n📍 Location: {city}, {country}", parse_mode="Markdown")
+
+    @bot.message_handler(commands=["precheck", "checkfresh"])
+    def cmd_precheck(m):
+        if not is_authorized(m.chat.id, cfg, bot, m):
+            return
+        parts = (m.text or "").split()
+        sub = parts[1].lower() if len(parts) > 1 else ""
+
+        cfg_data = ss.load_config(ss.CONFIG_PATH)
+        op = cfg_data.get("otp_provider") or {}
+
+        if sub == "on":
+            op["precheck_enabled"] = True
+            cfg_data["otp_provider"] = op
+            with open(ss.CONFIG_PATH, "w", encoding="utf-8") as fh:
+                json.dump(cfg_data, fh, indent=2)
+            safe_reply(bot, m, "✅ *Pre-Checker Enabled.*\nBot will verify number is fresh/unregistered before requesting OTP.", parse_mode="Markdown")
+            return
+        elif sub == "off":
+            op["precheck_enabled"] = False
+            cfg_data["otp_provider"] = op
+            with open(ss.CONFIG_PATH, "w", encoding="utf-8") as fh:
+                json.dump(cfg_data, fh, indent=2)
+            safe_reply(bot, m, "⚡ *Pre-Checker Disabled.*\nBot will request Swiggy OTP immediately for every rented number without checking beforehand.", parse_mode="Markdown")
+            return
+
+        cur_status = "ENABLED (Freshness verified before OTP)" if op.get("precheck_enabled", True) else "DISABLED (Direct OTP dispatch)"
+        text = (
+            f"🔍 *Registration Pre-Checker:* `{cur_status}`\n\n"
+            f"• `/precheck on` — verify number is fresh first (saves SMS costs)\n"
+            f"• `/precheck off` — bypass checker & request OTP immediately"
+        )
+        safe_reply(bot, m, text, parse_mode="Markdown")
 
 
 def start_bot():
