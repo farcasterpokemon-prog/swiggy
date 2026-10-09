@@ -504,7 +504,7 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
             precheck_on = (op.get("precheck_enabled", True) if isinstance(op, dict) else True)
             if precheck_on:
                 try:
-                    slog("🔍 Checking number %s on Swiggy..." % p)
+                    slog("🔍 Checking if %s is a fresh unregistered number on Swiggy..." % p)
                     registered, resp = ss.check_swiggy_registered(p, cfg)
                     status_str = str(resp.get("status", "unknown")).lower().strip()
                 except Exception as e:
@@ -513,11 +513,16 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                     status_str = "error"
 
                 if registered or status_str != "not_registered":
-                    slog("🚫 [PRE-CHECK REJECT] %s is REGISTERED / UNVERIFIED (status: '%s') -> Cancelling order %s for refund & buying next..." % (p, status_str, o))
+                    if status_str == "registered":
+                        slog("🚫 [Already Registered] %s was previously used on Swiggy. Cancelling order %s for refund & renting fresh number..." % (p, o))
+                    elif status_str == "error":
+                        slog("⚠️ [Checker Unavailable] Could not verify %s (status: 'error'). Cancelling for refund & trying next number..." % (p, o))
+                    else:
+                        slog("🚫 [Unverified Number] %s status is '%s'. Cancelling order %s for refund & trying next..." % (p, status_str, o))
                     ss.cancel_async(provider, o, rent_time=rent_time)
                     continue
 
-                slog("✨ [PRE-CHECK PASS] %s is 100%% FRESH (Unregistered). Proceeding to Swiggy OTP..." % p)
+                slog("✨ [100%% Fresh Number Confirmed] %s is brand new! Requesting Swiggy OTP..." % p)
 
             if ss.is_cancelled():
                 ss.cancel_async(provider, o, rent_time=rent_time)
