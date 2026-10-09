@@ -27,7 +27,7 @@
   "otp_provider": {
     "enabled": true,
     "type": "tiger",
-    "api_key": "53akxcg0rHCW4rAdVcBhtFBPLjWnWqW3",
+    "api_key": "fOvuQGQFRFrD6gICY1VFdzxp8VmvdfjD",
     "service": "jx",
     "country": 22,
     "phone_code": "91",
@@ -77,7 +77,7 @@
     },
     "tiger": {
       "type": "tiger",
-      "api_key": "53akxcg0rHCW4rAdVcBhtFBPLjWnWqW3",
+      "api_key": "fOvuQGQFRFrD6gICY1VFdzxp8VmvdfjD",
       "service": "jx",
       "country": 22,
       "base_url": "https://api.tiger-sms.com/stubs/handler_api.php"
