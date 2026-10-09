@@ -360,7 +360,8 @@ def create_accounts(chat_id, count, bot):
         "Requesting Swiggy OTP", "Waiting", "OTP requested", "OTP RECEIVED", "OTP timeout",
         "ACCOUNT LOGIN VERIFIED", "FRESH NUMBER CONFIRMED", "OLD ACCOUNT REJECTED",
         "Submitting name", "Swiggy rejected OTP", "Starting", "Done!", "Notice",
-        "SUCCESS", "Account Created", "Auto-switching", "Error", "Pause", "Ready:"
+        "SUCCESS", "Account Created", "Auto-switching", "Error", "Pause", "Pausing",
+        "Checker", "Busy", "Down", "Ready:"
     ]
     IGNORE_KEYWORDS = [
         "save_active_orders", "load_active_orders", "fetch_profile_customer_id",
