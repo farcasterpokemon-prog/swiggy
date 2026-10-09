@@ -480,7 +480,10 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 ss.register_active_order(o, p, getattr(provider, "cfg", {}).get("type", "nexnum"), rent_time)
             except Exception as e:
                 err_str = str(e)
-                if "NO_NUMBERS" in err_str:
+                if "NO_BALANCE" in err_str:
+                    slog("❌ [INSUFFICIENT FUNDS] Provider has no balance left. Aborting run.")
+                    return None
+                elif "NO_NUMBERS" in err_str:
                     slog("⚠️ Notice [attempt #%d]: No numbers in stock at max price. Retrying in 3s (use /setprice to increase)..." % attempt)
                 else:
                     slog("⚠️ Rent attempt #%d notice: %s" % (attempt, err_str[:120]))
