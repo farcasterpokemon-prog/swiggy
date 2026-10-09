@@ -509,20 +509,17 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                     status_str = str(resp.get("status", "unknown")).lower().strip()
                 except Exception as e:
                     slog("pre-checker notice for %s: %s" % (p, e))
-                    registered = True
-                    status_str = "error"
+                    registered = False
+                    status_str = "checker_fallback"
 
-                if registered or status_str != "not_registered":
-                    if status_str == "registered":
-                        slog("🚫 [Already Registered] %s was previously used on Swiggy. Cancelling order %s for refund & renting fresh number..." % (p, o))
-                    elif status_str == "error":
-                        slog("⚠️ [Checker Unavailable] Could not verify %s (status: 'error'). Cancelling for refund & trying next number..." % (p, o))
-                    else:
-                        slog("🚫 [Unverified Number] %s status is '%s'. Cancelling order %s for refund & trying next..." % (p, status_str, o))
+                if registered or status_str == "registered":
+                    slog("🚫 [Already Registered] %s was previously used on Swiggy. Cancelling order %s for refund & renting fresh number..." % (p, o))
                     ss.cancel_async(provider, o, rent_time=rent_time)
                     continue
-
-                slog("✨ [100%% Fresh Number Confirmed] %s is brand new! Requesting Swiggy OTP..." % p)
+                elif status_str == "checker_fallback":
+                    slog("⚠️ [Checker Server Busy] Proceeding to Swiggy OTP for %s (live freshness will be verified on login)..." % p)
+                else:
+                    slog("✨ [100%% Fresh Number Confirmed] %s is brand new! Requesting Swiggy OTP..." % p)
 
             if ss.is_cancelled():
                 ss.cancel_async(provider, o, rent_time=rent_time)
