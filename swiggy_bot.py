@@ -320,6 +320,7 @@ def send_batch_zip(chat_id, accounts_list, bot, batch_title="10-Pack"):
 def create_accounts(chat_id, count, bot):
     ss.reset_cancel()
     RUNNING["active"] = True
+    RUNNING["start_time"] = time.time()
     RUNNING["done"] = 0
     RUNNING["total"] = count
     RUNNING["cancel"] = False
@@ -631,9 +632,17 @@ def register_handlers(bot, cfg):
             safe_reply(bot, m, "Count must be between 1 and 100.")
             return
         with RUN_LOCK:
-            if RUNNING["active"]:
-                safe_reply(bot, m, "⚠️ A creation run is already active. Send /cancel or /cancelall to stop it.")
+            if RUNNING.get("active"):
+                elapsed_run = time.time() - RUNNING.get("start_time", 0)
+                if elapsed_run > 300:
+                    log(f"Auto-clearing stale run after {int(elapsed_run)}s")
+                    RUNNING["active"] = False
+                    ss.reset_cancel()
+            if RUNNING.get("active"):
+                safe_reply(bot, m, "⚠️ A creation run is currently active. Send /cancel or /cancelall to stop it.")
                 return
+            RUNNING["active"] = True
+            RUNNING["start_time"] = time.time()
             t = threading.Thread(target=create_accounts, args=(m.chat.id, n, bot), daemon=True)
             t.start()
 
