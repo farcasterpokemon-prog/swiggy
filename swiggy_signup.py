@@ -1350,6 +1350,8 @@ def get_otp(adb, provider, op, phone, order_id, s):
         raw = ""
         resent = 0
         next_resend = time.time() + resend_at
+        start_wait = time.time()
+        last_heartbeat = start_wait
         while time.time() < end:
             if is_cancelled():
                 log("[%s] OTP wait cancelled instantly!" % phone)
@@ -1362,6 +1364,11 @@ def get_otp(adb, provider, op, phone, order_id, s):
             otp = extract_otp(raw)
             if otp:
                 return otp, "provider", raw
+            if time.time() - last_heartbeat >= 10.0:
+                elapsed_s = int(time.time() - start_wait)
+                pname = getattr(provider, "cfg", {}).get("type", "SMS Provider").upper()
+                log("⏳ [%s] Waiting for OTP from %s (%ds / %ds)..." % (phone, pname, elapsed_s, int(max_wait)))
+                last_heartbeat = time.time()
             if time.time() >= next_resend and hasattr(provider, "set_status"):
                 resent += 1
                 next_resend = time.time() + resend_at
