@@ -541,14 +541,35 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                     ss.cancel_async(provider, o, rent_time=rent_time)
                     continue
                 elif status_str in ["checker_fallback", "error", "timeout", "busy", "unknown"]:
-                    slog("⏳ [Checker Busy / Down] 3rd-party checker server is busy or timed out. Pausing for 30 seconds before proceeding...")
+                    slog("⏳ [Checker Busy / Down] 3rd-party checker server is busy or timed out. Pausing for 30 seconds before re-checking...")
                     if ss.cancel_sleep(30):
                         ss.log("[%s] Cancelled during 30s pause." % p)
                         ss.cancel_async(provider, o, rent_time=rent_time)
                         return None
-                    slog("✨ [30s Pause Complete] Proceeding to verify %s on Swiggy..." % p)
-                else:
+
+                    # Re-check number once more after 30s pause
+                    try:
+                        registered2, resp2 = ss.check_swiggy_registered(p, cfg)
+                        status_str2 = str(resp2.get("status", "unknown")).lower().strip()
+                    except Exception:
+                        registered2, status_str2 = False, "error"
+
+                    if registered2 or status_str2 == "registered":
+                        slog("🚫 [Already Registered] %s was previously used on Swiggy. Cancelling order %s for refund & renting fresh number..." % (p, o))
+                        ss.cancel_async(provider, o, rent_time=rent_time)
+                        continue
+                    elif status_str2 == "not_registered":
+                        slog("✨ [100%% Fresh Number Confirmed] %s is brand new!" % p)
+                    else:
+                        slog("🚫 [Unconfirmed Freshness] Checker could not verify %s. Cancelling order %s for 100%% refund & renting next..." % (p, o))
+                        ss.cancel_async(provider, o, rent_time=rent_time)
+                        continue
+                elif status_str == "not_registered":
                     slog("✨ [100%% Fresh Number Confirmed] %s is brand new!" % p)
+                else:
+                    slog("🚫 [Unverified Number] Status for %s is '%s'. Cancelling order %s for refund & renting next..." % (p, status_str, o))
+                    ss.cancel_async(provider, o, rent_time=rent_time)
+                    continue
 
             if ss.is_cancelled():
                 ss.cancel_async(provider, o, rent_time=rent_time)
