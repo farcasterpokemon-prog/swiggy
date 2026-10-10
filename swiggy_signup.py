@@ -811,12 +811,27 @@ class GenericSmsProvider(SmsActivateBaseProvider):
     pass
 
 
+CHECKER_CALL_LOCK = threading.Lock()
+LAST_CHECKER_TIMESTAMP = 0.0
+
+
 def check_single_pass(mobile, url, timeout=4):
+    global LAST_CHECKER_TIMESTAMP
     clean = re.sub(r"\D", "", str(mobile).strip())
-    if clean.startswith("91") and len(clean) == 12:
+    if len(clean) > 10 and clean.startswith("91"):
         clean = clean[2:]
-    elif clean.startswith("0") and len(clean) == 11:
+    elif len(clean) > 10 and clean.startswith("0"):
         clean = clean[1:]
+    elif len(clean) > 10:
+        clean = clean[-10:]
+
+    # Rate-limit requests to checker server so it never throws 500 or drops connections
+    with CHECKER_CALL_LOCK:
+        now = time.time()
+        gap = now - LAST_CHECKER_TIMESTAMP
+        if gap < 0.6:
+            time.sleep(0.6 - gap)
+        LAST_CHECKER_TIMESTAMP = time.time()
 
     headers = {
         "Content-Type": "application/json",
@@ -824,14 +839,23 @@ def check_single_pass(mobile, url, timeout=4):
         "Accept": "application/json, text/plain, */*",
     }
     payload = json.dumps({"mobile": clean}).encode("utf-8")
-    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     opener = get_opener()
-    with opener.open(req, timeout=timeout) as r:
-        res_raw = r.read().decode("utf-8", "replace")
+
+    for attempt in range(1, 3):
         try:
-            data = json.loads(res_raw)
-        except Exception:
-            data = {"_raw": res_raw}
+            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+            with opener.open(req, timeout=timeout) as r:
+                res_raw = r.read().decode("utf-8", "replace")
+                try:
+                    data = json.loads(res_raw)
+                except Exception:
+                    data = {"_raw": res_raw}
+                break
+        except Exception as e:
+            if attempt == 1:
+                time.sleep(1.5)
+                continue
+            return "error", {"status": "error", "error": str(e), "mobile": clean}
 
     status = str(data.get("status") or "").lower().strip()
     msg = str(data.get("message") or data.get("msg") or data.get("statusMessage") or "").lower()
@@ -881,40 +905,43 @@ def check_single_pass(mobile, url, timeout=4):
 
 def check_swiggy_registered(mobile, cfg):
     """
-    Fast Registration Checker with fast failover.
+    Fast Registration Checker with strict status return.
     Returns: (is_registered, response_dict)
     - If confirmed 'not_registered' -> (False, {'status': 'not_registered', 'mobile': clean})
     - If confirmed 'registered' -> (True, {'status': 'registered', 'mobile': clean})
     - If checker timed out or errored -> (False, {'status': 'checker_fallback', 'error': err, 'mobile': clean})
     """
     clean = re.sub(r"\D", "", str(mobile).strip())
-    if clean.startswith("91") and len(clean) == 12:
+    if len(clean) > 10 and clean.startswith("91"):
         clean = clean[2:]
-    elif clean.startswith("0") and len(clean) == 11:
+    elif len(clean) > 10 and clean.startswith("0"):
         clean = clean[1:]
+    elif len(clean) > 10:
+        clean = clean[-10:]
 
     op = cfg.get("otp_provider") if isinstance(cfg.get("otp_provider"), dict) else {}
     urls = [
         cfg.get("check_url") or op.get("check_url") or "https://checker.otpcart.xyz/api/check-swiggy",
     ]
 
+    last_data = {}
     for url in urls:
         if not url:
             continue
         try:
-            status1, data1 = check_single_pass(clean, url, timeout=2.5)
+            status1, data1 = check_single_pass(clean, url, timeout=4.0)
             if status1 == "not_registered":
                 return False, {"status": "not_registered", "mobile": clean}
             elif status1 == "registered":
                 data1.setdefault("status", "registered")
                 data1.setdefault("mobile", clean)
                 return True, data1
+            last_data = data1
         except Exception as e:
+            last_data = {"error": str(e)}
             continue
 
-    # Graceful Failover: If 3rd-party checker server is down/timed out, proceed to Swiggy OTP
-    # Swiggy's official verification API (login/verify) performs the final 100% accurate freshness check
-    return False, {"status": "checker_fallback", "mobile": clean}
+    return False, {"status": "checker_fallback", "mobile": clean, "details": last_data}
 
 
 def make_provider(op):
