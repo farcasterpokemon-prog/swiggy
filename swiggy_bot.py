@@ -354,7 +354,7 @@ def create_accounts(chat_id, count, bot):
     log_queue = queue.Queue(maxsize=100)
     stop_logger = threading.Event()
 
-    # Log filter: only stream number buy and check status milestones to Telegram
+    # Log filter: only stream number buy, check status, and insufficient funds milestones to Telegram
     MILESTONE_KEYWORDS = [
         "Bought number",
         "Checking",
@@ -363,7 +363,9 @@ def create_accounts(chat_id, count, bot):
         "OLD ACCOUNT REJECTED",
         "Checker Busy",
         "Pausing for 30 seconds",
+        "Insufficient Funds",
         "INSUFFICIENT FUNDS",
+        "Balance Recharged",
         "Auto-switching",
     ]
     IGNORE_KEYWORDS = [
@@ -456,17 +458,41 @@ def create_accounts(chat_id, count, bot):
             safe_send_message(
                 bot,
                 chat_id,
-                f"❌ *Account Creation Paused!*\n\n"
-                f"• *Active Provider:* `{prov_name}`\n"
-                f"• *Status / Balance:* `{bal_str}`\n\n"
-                f"💡 *Fix:* Please recharge your provider balance or update your API key:\n"
-                f"• Use `/setkey <new_api_key>`\n"
-                f"• Or use `/setprovider uotp` to switch provider.",
+                f"⏳ *[Insufficient Funds]* Active Provider (*{prov_name}*) balance is `{bal_str}`.\n"
+                f"Pausing for 1 minute for recharge... (Please recharge balance or use `/setkey <key>`)\n"
+                f"Send `/cancel` to abort.",
                 parse_mode="Markdown",
                 reply_markup=get_control_keyboard(),
             )
-            RUNNING["active"] = False
-            return
+            if ss.cancel_sleep(60):
+                RUNNING["active"] = False
+                return
+
+            bal_retry = ss.get_provider_balance(op)
+            bal_retry_str = str(bal_retry).strip()
+            try:
+                rval = float(re.sub(r"[^\d.]", "", bal_retry_str) or 0)
+            except Exception:
+                rval = 0
+
+            if rval >= 0.08 and not any(err in bal_retry_str.lower() for err in ["bad_key", "error", "invalid", "no_key"]):
+                safe_send_message(
+                    bot,
+                    chat_id,
+                    f"✨ *[Balance Recharged]* Provider *{prov_name}* balance is now `{bal_retry_str}`! Proceeding with account creation...",
+                    parse_mode="Markdown",
+                )
+            else:
+                safe_send_message(
+                    bot,
+                    chat_id,
+                    f"❌ *[Insufficient Funds]* Balance is still `{bal_retry_str}`.\n"
+                    f"Account creation stopped. Please recharge your provider balance or update API key via `/setkey`.",
+                    parse_mode="Markdown",
+                    reply_markup=get_control_keyboard(),
+                )
+                RUNNING["active"] = False
+                return
 
     try:
         workers = min(count, 100)
@@ -505,7 +531,10 @@ def create_accounts(chat_id, count, bot):
 
                     # If this worker finished but we still need more accounts, spawn replacement worker
                     if created + len(futs) < count and not (ss.is_cancelled() or RUNNING["cancel"]):
-                        futs.add(ex.submit(api.create_api_account, cfg))
+                        if getattr(api, "INSUFFICIENT_PAUSE_UNTIL", 0) > time.time():
+                            time.sleep(1.0)
+                        else:
+                            futs.add(ex.submit(api.create_api_account, cfg))
 
             # CAPTURE & DELIVER ALL REMAINING IN-FLIGHT ACCOUNTS (Zero accounts dropped!)
             if futs and not (ss.is_cancelled() or RUNNING["cancel"]):
