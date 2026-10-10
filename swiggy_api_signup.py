@@ -30,6 +30,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import swiggy_signup as ss
 
 LOG_HOOK = None
+INSUFFICIENT_FUNDS_LOCK = threading.Lock()
+INSUFFICIENT_PAUSE_UNTIL = 0.0
 
 
 def notify(msg):
@@ -480,13 +482,37 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 ss.register_active_order(o, p, getattr(provider, "cfg", {}).get("type", "nexnum"), rent_time)
             except Exception as e:
                 err_str = str(e)
-                if "NO_BALANCE" in err_str:
-                    slog("❌ [INSUFFICIENT FUNDS] Provider has no balance left. Aborting run.")
-                    return None
+                is_no_balance = any(k in err_str.upper() for k in ["NO_BALANCE", "INSUFFICIENT", "NOT ENOUGH", "NO_MONEY", "LOW_BALANCE", "ZERO_BALANCE"])
+                if is_no_balance:
+                    global INSUFFICIENT_PAUSE_UNTIL
+                    with INSUFFICIENT_FUNDS_LOCK:
+                        now = time.time()
+                        # Only broadcast the message once per 60 seconds (zero spam!)
+                        if now >= INSUFFICIENT_PAUSE_UNTIL:
+                            INSUFFICIENT_PAUSE_UNTIL = now + 60.0
+                            slog("⏳ [Insufficient Funds] Provider balance is empty or insufficient. Pausing for 1 minute before retrying... (Please recharge or use /setkey)")
+                        pause_sec = max(1.0, INSUFFICIENT_PAUSE_UNTIL - time.time())
+
+                    ss.log("Worker pausing %ds due to insufficient provider balance..." % int(pause_sec))
+                    if ss.cancel_sleep(pause_sec):
+                        return None
+
+                    # After 1 min pause, re-check provider balance
+                    try:
+                        new_bal = ss.get_provider_balance(op)
+                        val = float(re.sub(r"[^\d.]", "", str(new_bal)) or 0)
+                        if val >= 0.08:
+                            with INSUFFICIENT_FUNDS_LOCK:
+                                if INSUFFICIENT_PAUSE_UNTIL > 0:
+                                    INSUFFICIENT_PAUSE_UNTIL = 0.0
+                                    slog("✨ [Balance Recharged] Provider balance is now %s! Resuming account creation..." % new_bal)
+                    except Exception:
+                        pass
+                    continue
                 elif "NO_NUMBERS" in err_str:
-                    slog("⚠️ Notice [attempt #%d]: No numbers in stock at max price. Retrying in 3s (use /setprice to increase)..." % attempt)
+                    ss.log("⚠️ Notice [attempt #%d]: No numbers in stock at max price. Retrying in 3s (use /setprice to increase)..." % attempt)
                 else:
-                    slog("⚠️ Rent attempt #%d notice: %s" % (attempt, err_str[:120]))
+                    ss.log("⚠️ Rent attempt #%d notice: %s" % (attempt, err_str[:120]))
                 if ss.cancel_sleep(3):
                     return None
                 continue
