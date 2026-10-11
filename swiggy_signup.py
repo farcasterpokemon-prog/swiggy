@@ -12,6 +12,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -642,7 +643,34 @@ class TigerProvider(SmsActivateBaseProvider):
 
     def __init__(self, cfg):
         super().__init__(cfg)
-        self.service = cfg.get("service", "jx")
+        self.service = cfg.get("service", "cw")
+        self.services = [self.service, "cw", "swiggy", "jx", "hp"]
+
+    def get_number(self):
+        last_err = None
+        for svc in list(dict.fromkeys(self.services)):
+            params = {"service": svc, "country": self.country}
+            data = self._call("getNumber", **params)
+            raw = data.get("_raw", "")
+            if isinstance(raw, str) and raw.startswith("ACCESS_NUMBER"):
+                parts = raw.split(":")
+                if len(parts) >= 3:
+                    order_id = parts[1]
+                    phone = parts[2]
+                    if phone.startswith(self.phone_code):
+                        phone = phone[len(self.phone_code):]
+                    return str(phone), str(order_id)
+            if isinstance(data, dict) and (data.get("activationId") or data.get("id")):
+                order_id = str(data.get("activationId") or data.get("id"))
+                number = str(data.get("phoneNumber") or data.get("phone") or "")
+                if number.startswith(self.phone_code):
+                    number = number[len(self.phone_code):]
+                return number, order_id
+            last_err = raw or data
+            if "NO_NUMBERS" in str(last_err):
+                continue
+            break
+        raise RuntimeError(f"Tiger SMS getNumber failed: {last_err}")
 
 
 class SmsActivateProvider(SmsActivateBaseProvider):
@@ -784,107 +812,147 @@ class GenericSmsProvider(SmsActivateBaseProvider):
     pass
 
 
-def check_single_pass(mobile, url, timeout=4):
-    clean = re.sub(r"\D", "", str(mobile).strip())
-    if clean.startswith("91") and len(clean) == 12:
-        clean = clean[2:]
-    elif clean.startswith("0") and len(clean) == 11:
-        clean = clean[1:]
+def generate_random_name():
+    firsts = ["Rahul", "Rohit", "Amit", "Pooja", "Neha", "Priya", "Ananya", "Aarav", "Vikram", "Sanjay", "Kavya", "Deepak", "Manish", "Sunita"]
+    lasts = ["Sharma", "Verma", "Gupta", "Singh", "Kumar", "Patel", "Reddy", "Joshi", "Mehta", "Rao", "Nair", "Das", "Yadav", "Mishra"]
+    return f"{random.choice(firsts)} {random.choice(lasts)}"
 
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
+
+def generate_random_email(name):
+    clean = re.sub(r"[^a-zA-Z0-9]", "", str(name or "user")).lower()
+    return f"{clean}_{uuid.uuid4().hex[:6]}@gmail.com"
+
+
+def get_signup_check_headers(device_id=None):
+    dev = str(device_id or uuid.uuid4().hex[:16])
+    return {
+        "pl-version": "140",
+        "user-agent": "Swiggy-Android",
+        "content-type": "application/json; charset=utf-8",
+        "version-code": "1807",
+        "app-version": "4.114.2",
+        "latitude": "0.0",
+        "longitude": "0.0",
+        "os-version": "12",
+        "accessibility_enabled": "false",
+        "swuid": dev,
+        "deviceid": dev,
+        "x-network-quality": "GOOD",
+        "faw-flags": "1354",
+        "accept-encoding": "gzip",
+        "accept": "application/json; charset=utf-8",
     }
-    payload = json.dumps({"mobile": clean}).encode("utf-8")
-    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-    opener = get_opener()
-    with opener.open(req, timeout=timeout) as r:
-        res_raw = r.read().decode("utf-8", "replace")
+
+
+CHECKER_SESSION = None
+CHECKER_SESSION_LOCK = threading.Lock()
+
+
+def get_checker_session():
+    global CHECKER_SESSION
+    if CHECKER_SESSION is None:
         try:
-            data = json.loads(res_raw)
+            import requests
+            CHECKER_SESSION = requests.Session()
         except Exception:
-            data = {"_raw": res_raw}
-
-    status = str(data.get("status") or "").lower().strip()
-    msg = str(data.get("message") or data.get("msg") or data.get("statusMessage") or "").lower()
-
-    # 1. Strictly Unregistered Check
-    if status in ["not_registered", "unregistered", "notregistered", "new_user", "fresh"]:
-        return "not_registered", data
-    elif data.get("registered") is False or str(data.get("registered", "")).lower() == "false":
-        return "not_registered", data
-    elif data.get("is_registered") is False or str(data.get("is_registered", "")).lower() == "false":
-        return "not_registered", data
-
-    # 2. Registered Check
-    if status in ["registered", "exists", "already_registered", "true"]:
-        return "registered", data
-    elif data.get("registered") is True or str(data.get("registered", "")).lower() == "true":
-        return "registered", data
-    elif data.get("is_registered") is True or str(data.get("is_registered", "")).lower() == "true":
-        return "registered", data
-    elif "already registered" in msg or "account exists" in msg or "user exists" in msg:
-        return "registered", data
-
-    # 3. Check nested structures
-    nested = data.get("data") or data.get("result")
-    if isinstance(nested, dict):
-        nested_status = str(nested.get("status") or "").lower().strip()
-        nested_msg = str(nested.get("message") or nested.get("msg") or "").lower()
-        if nested_status in ["not_registered", "unregistered", "notregistered", "new_user", "fresh"]:
-            return "not_registered", data
-        elif nested.get("registered") is False or str(nested.get("registered", "")).lower() == "false":
-            return "not_registered", data
-        elif nested.get("is_registered") is False or str(nested.get("is_registered", "")).lower() == "false":
-            return "not_registered", data
-
-        if nested_status in ["registered", "exists", "already_registered", "true"]:
-            return "registered", data
-        elif nested.get("registered") is True or str(nested.get("registered", "")).lower() == "true":
-            return "registered", data
-        elif nested.get("is_registered") is True or str(nested.get("is_registered", "")).lower() == "true":
-            return "registered", data
-        elif "already registered" in nested_msg or "account exists" in nested_msg or "user exists" in nested_msg:
-            return "registered", data
-
-    # 4. If status is anything else (e.g. unknown, empty, invalid schema), treat as unknown
-    return "unknown", data
+            pass
+    return CHECKER_SESSION
 
 
-def check_swiggy_registered(mobile, cfg):
+def detect_user(mobile, session=None):
     """
-    Fast Registration Checker with automatic sanitization and fail-safe fallback.
-    Returns: (is_registered, response_dict)
-    - If strictly 'not_registered' -> (False, {'status': 'not_registered', 'mobile': clean})
-    - If strictly 'registered' -> (True, {'status': 'registered', 'mobile': clean})
-    - If 'error' / 'unknown' -> (False, {'status': status, 'mobile': clean})
+    Check if a Swiggy mobile number is new or existing directly via Swiggy API.
+    
+    Args:
+        mobile: 10-digit mobile number (str or int)
+        session: optional requests.Session (reuses TCP connection)
+    
+    Returns:
+        "new", data       → user does not exist on Swiggy (100% fresh)
+        "existing", data  → user already has a Swiggy account
+        "unknown", data   → network error or unexpected response
     """
     clean = re.sub(r"\D", "", str(mobile).strip())
-    if clean.startswith("91") and len(clean) == 12:
+    if len(clean) > 10 and clean.startswith("91"):
         clean = clean[2:]
-    elif clean.startswith("0") and len(clean) == 11:
+    elif len(clean) > 10 and clean.startswith("0"):
         clean = clean[1:]
+    elif len(clean) > 10:
+        clean = clean[-10:]
 
-    op = cfg.get("otp_provider") if isinstance(cfg.get("otp_provider"), dict) else {}
-    url = cfg.get("check_url") or op.get("check_url") or "https://checker.otpcart.xyz/api/check-swiggy"
+    device_id = uuid.uuid4().hex[:16]
+    name = generate_random_name()
+    email = generate_random_email(name)
+
+    headers = get_signup_check_headers(device_id)
+    payload = {"email": email, "mobile": clean, "name": name}
 
     try:
-        status1, data1 = check_single_pass(clean, url, timeout=4)
-    except Exception as e:
-        status1, data1 = "error", {"error": str(e), "status": "error", "mobile": clean}
+        import requests
+        if session is None:
+            session = get_checker_session() or requests.Session()
 
-    if status1 == "not_registered":
-        return False, {"status": "not_registered", "mobile": clean}
-    elif status1 == "registered":
-        data1.setdefault("status", "registered")
-        data1.setdefault("mobile", clean)
-        return True, data1
+        response = session.post(
+            "https://profile.swiggy.com/api/v2/app/signup",
+            headers=headers,
+            json=payload,
+            timeout=8,
+        )
+        data = response.json()
+        msg = (data.get("statusMessage") or "").lower()
+        code = data.get("statusCode")
+
+        if code == 3 or "already exist" in msg or "already registered" in msg:
+            return "existing", data
+        if code == 0 or "done successfully" in msg or data.get("tid"):
+            return "new", data
+        return "unknown", data
+    except Exception as e:
+        # Fallback using urllib
+        try:
+            req = urllib.request.Request(
+                "https://profile.swiggy.com/api/v2/app/signup",
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            opener = get_opener()
+            with opener.open(req, timeout=8) as r:
+                data = json.loads(r.read().decode("utf-8", "replace"))
+            msg = (data.get("statusMessage") or "").lower()
+            code = data.get("statusCode")
+            if code == 3 or "already exist" in msg or "already registered" in msg:
+                return "existing", data
+            if code == 0 or "done successfully" in msg or data.get("tid"):
+                return "new", data
+            return "unknown", data
+        except Exception as e2:
+            return "unknown", {"error": str(e2)}
+
+
+def check_swiggy_registered(mobile, cfg=None):
+    """
+    Native Swiggy Registration Checker.
+    Returns: (is_registered, response_dict)
+    - If user exists ('existing') → (True, {'status': 'registered', 'mobile': clean})
+    - If user is brand new ('new') → (False, {'status': 'not_registered', 'mobile': clean})
+    - If unknown/error ('unknown') → (False, {'status': 'unknown', 'mobile': clean})
+    """
+    clean = re.sub(r"\D", "", str(mobile).strip())
+    if len(clean) > 10 and clean.startswith("91"):
+        clean = clean[2:]
+    elif len(clean) > 10 and clean.startswith("0"):
+        clean = clean[1:]
+    elif len(clean) > 10:
+        clean = clean[-10:]
+
+    status, data = detect_user(clean)
+    if status == "existing":
+        return True, {"status": "registered", "mobile": clean, "raw": data}
+    elif status == "new":
+        return False, {"status": "not_registered", "mobile": clean, "raw": data}
     else:
-        # Fail open on checker outage/unknown so account creation doesn't stall
-        data1.setdefault("status", status1)
-        data1.setdefault("mobile", clean)
-        return False, data1
+        return False, {"status": "unknown", "mobile": clean, "raw": data}
 
 
 def make_provider(op):
@@ -1312,14 +1380,16 @@ def tap_center(adb, node):
 def get_otp(adb, provider, op, phone, order_id, s):
     source = s.get("otp_source", "device")
     if source == "provider" and provider:
-        max_wait = op.get("max_wait_sec", 45)
-        interval = op.get("poll_interval_sec", 1.5)
-        resend_at = op.get("resend_after_sec", 25)
+        max_wait = op.get("max_wait_sec", 50)
+        interval = op.get("poll_interval_sec", 1.2)
+        resend_at = op.get("resend_after_sec", 999)
         log("waiting for OTP from provider (max %ds)" % max_wait)
         end = time.time() + max_wait
         raw = ""
         resent = 0
         next_resend = time.time() + resend_at
+        start_wait = time.time()
+        last_heartbeat = start_wait
         while time.time() < end:
             if is_cancelled():
                 log("[%s] OTP wait cancelled instantly!" % phone)
@@ -1332,6 +1402,11 @@ def get_otp(adb, provider, op, phone, order_id, s):
             otp = extract_otp(raw)
             if otp:
                 return otp, "provider", raw
+            if time.time() - last_heartbeat >= 10.0:
+                elapsed_s = int(time.time() - start_wait)
+                pname = getattr(provider, "cfg", {}).get("type", "SMS Provider").upper()
+                log("⏳ [%s] Waiting for OTP from %s (%ds / %ds)..." % (phone, pname, elapsed_s, int(max_wait)))
+                last_heartbeat = time.time()
             if time.time() >= next_resend and hasattr(provider, "set_status"):
                 resent += 1
                 next_resend = time.time() + resend_at

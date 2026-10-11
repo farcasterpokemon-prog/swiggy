@@ -30,6 +30,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import swiggy_signup as ss
 
 LOG_HOOK = None
+INSUFFICIENT_FUNDS_LOCK = threading.Lock()
+INSUFFICIENT_PAUSE_UNTIL = 0.0
 
 
 def notify(msg):
@@ -480,10 +482,37 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 ss.register_active_order(o, p, getattr(provider, "cfg", {}).get("type", "nexnum"), rent_time)
             except Exception as e:
                 err_str = str(e)
-                if "NO_NUMBERS" in err_str:
-                    slog("⚠️ Notice [attempt #%d]: No numbers in stock at max price. Retrying in 3s (use /setprice to increase)..." % attempt)
+                is_no_balance = any(k in err_str.upper() for k in ["NO_BALANCE", "INSUFFICIENT", "NOT ENOUGH", "NO_MONEY", "LOW_BALANCE", "ZERO_BALANCE"])
+                if is_no_balance:
+                    global INSUFFICIENT_PAUSE_UNTIL
+                    with INSUFFICIENT_FUNDS_LOCK:
+                        now = time.time()
+                        # Only broadcast the message once per 60 seconds (zero spam!)
+                        if now >= INSUFFICIENT_PAUSE_UNTIL:
+                            INSUFFICIENT_PAUSE_UNTIL = now + 60.0
+                            slog("⏳ [Insufficient Funds] Provider balance is empty or insufficient. Pausing for 1 minute before retrying... (Please recharge or use /setkey)")
+                        pause_sec = max(1.0, INSUFFICIENT_PAUSE_UNTIL - time.time())
+
+                    ss.log("Worker pausing %ds due to insufficient provider balance..." % int(pause_sec))
+                    if ss.cancel_sleep(pause_sec):
+                        return None
+
+                    # After 1 min pause, re-check provider balance
+                    try:
+                        new_bal = ss.get_provider_balance(op)
+                        val = float(re.sub(r"[^\d.]", "", str(new_bal)) or 0)
+                        if val >= 0.08:
+                            with INSUFFICIENT_FUNDS_LOCK:
+                                if INSUFFICIENT_PAUSE_UNTIL > 0:
+                                    INSUFFICIENT_PAUSE_UNTIL = 0.0
+                                    slog("✨ [Balance Recharged] Provider balance is now %s! Resuming account creation..." % new_bal)
+                    except Exception:
+                        pass
+                    continue
+                elif "NO_NUMBERS" in err_str:
+                    ss.log("⚠️ Notice [attempt #%d]: No numbers in stock at max price. Retrying in 3s (use /setprice to increase)..." % attempt)
                 else:
-                    slog("⚠️ Rent attempt #%d notice: %s" % (attempt, err_str[:120]))
+                    ss.log("⚠️ Rent attempt #%d notice: %s" % (attempt, err_str[:120]))
                 if ss.cancel_sleep(3):
                     return None
                 continue
@@ -499,46 +528,71 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
             precheck_on = (op.get("precheck_enabled", True) if isinstance(op, dict) else True)
             if precheck_on:
                 try:
-                    slog("🔍 Checking number %s on Swiggy..." % p)
+                    slog("🔍 Checking if %s is a fresh unregistered number on Swiggy..." % p)
                     registered, resp = ss.check_swiggy_registered(p, cfg)
                     status_str = str(resp.get("status", "unknown")).lower().strip()
                 except Exception as e:
-                    slog("pre-checker notice for %s: %s" % (p, e))
+                    ss.log("pre-checker notice for %s: %s" % (p, e))
                     registered = False
-                    status_str = "error"
+                    status_str = "checker_fallback"
 
                 if registered or status_str == "registered":
-                    slog("🚫 [PRE-CHECK REJECT] %s is REGISTERED on Swiggy -> Cancelling order %s in background for refund & buying next..." % (p, o))
+                    slog("🚫 [Already Registered] %s was previously used on Swiggy. Cancelling order %s for refund & renting fresh number..." % (p, o))
                     ss.cancel_async(provider, o, rent_time=rent_time)
                     continue
+                elif status_str in ["checker_fallback", "error", "timeout", "busy", "unknown"]:
+                    ss.log("[%s] Checker status '%s' -> retrying in 3s..." % (p, status_str))
+                    if ss.cancel_sleep(3):
+                        ss.log("[%s] Cancelled during retry pause." % p)
+                        ss.cancel_async(provider, o, rent_time=rent_time)
+                        return None
 
-                if status_str == "not_registered":
-                    slog("✨ [PRE-CHECK PASS] %s is UNREGISTERED (Fresh). Proceeding to Swiggy OTP..." % p)
+                    # Re-check number once more after retry pause
+                    try:
+                        registered2, resp2 = ss.check_swiggy_registered(p, cfg)
+                        status_str2 = str(resp2.get("status", "unknown")).lower().strip()
+                    except Exception:
+                        registered2, status_str2 = False, "error"
+
+                    if registered2 or status_str2 == "registered":
+                        slog("🚫 [Already Registered] %s was previously used on Swiggy. Cancelling order %s for refund & renting fresh number..." % (p, o))
+                        ss.cancel_async(provider, o, rent_time=rent_time)
+                        continue
+                    elif status_str2 == "not_registered":
+                        slog("✨ [100%% Fresh Number Confirmed] %s is brand new!" % p)
+                    else:
+                        slog("🚫 [Unconfirmed Freshness] Could not verify %s. Cancelling order %s for 100%% refund & renting next..." % (p, o))
+                        ss.cancel_async(provider, o, rent_time=rent_time)
+                        continue
+                elif status_str == "not_registered":
+                    slog("✨ [100%% Fresh Number Confirmed] %s is brand new!" % p)
                 else:
-                    slog("⚠️ [PRE-CHECK NOTICE] %s status is '%s'. Proceeding to Swiggy OTP..." % (p, status_str))
+                    slog("🚫 [Unverified Number] Status for %s is '%s'. Cancelling order %s for refund & renting next..." % (p, status_str, o))
+                    ss.cancel_async(provider, o, rent_time=rent_time)
+                    continue
 
             if ss.is_cancelled():
                 ss.cancel_async(provider, o, rent_time=rent_time)
                 return None
 
-            slog("[%s] Requesting Swiggy OTP..." % p)
+            ss.log("[%s] Requesting Swiggy OTP..." % p)
             sw = uuid.uuid4().hex[:16]
             code, data = send_otp(p, sw)
             if code != 200 or data.get("statusCode") != 0:
-                slog("[%s] sms_otp failed (HTTP %d): %s -> Cancelling in background & buying next..." % (p, code, str(data)[:120]))
+                ss.log("[%s] sms_otp failed (HTTP %d): %s -> Cancelling in background & buying next..." % (p, code, str(data)[:120]))
                 ss.cancel_async(provider, o, rent_time=rent_time)
                 continue
 
             tid0 = data.get("tid", "")
             sid0 = data.get("sid", "")
-            slog("[%s] OTP requested successfully. Waiting up to 2 minutes for SMS..." % p)
+            ss.log("[%s] OTP requested successfully. Waiting up to 50s for SMS..." % p)
 
             otp, _s, _r = ss.get_otp(None, provider, op, p, o, cfg["signup"])
             if not otp:
                 if ss.is_cancelled():
-                    slog("[%s] Cancelled during OTP wait -> cancelling order %s" % (p, o))
+                    ss.log("[%s] Cancelled during OTP wait -> cancelling order %s" % (p, o))
                 else:
-                    slog("[%s] ⏰ OTP timeout -> Cancelling order %s in background & buying next number..." % (p, o))
+                    ss.log("[%s] ⏰ OTP timeout -> Cancelling order %s in background & buying next number..." % (p, o))
                 ss.cancel_async(provider, o, rent_time=rent_time)
                 if ss.is_cancelled():
                     return None
@@ -548,11 +602,11 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 ss.cancel_async(provider, o, rent_time=rent_time)
                 return None
 
-            slog("[%s] 🔥 OTP RECEIVED: %s" % (p, otp))
+            ss.log("[%s] 🔥 OTP RECEIVED: %s" % (p, otp))
             code, data = verify_otp(otp, tid0, sid0, sw)
             status_code = data.get("statusCode")
             status_msg = data.get("statusMessage") or data.get("message") or data.get("error") or ""
-            slog("[%s] verify response -> HTTP %d status=%s msg='%s'" % (p, code, status_code, status_msg))
+            ss.log("[%s] verify response -> HTTP %d status=%s msg='%s'" % (p, code, status_code, status_msg))
 
             is_verify_ok = (code in [200, 201]) and (status_code in [0, "0"] or (status_code is None and bool(data.get("tid"))))
             if is_verify_ok:
@@ -561,29 +615,33 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 tid1 = data.get("tid") or (data.get("data") or {}).get("tid") or tid0
                 sid1 = data.get("sid") or (data.get("data") or {}).get("sid") or sid0
 
+                # Strict Fresh Check: Discard old accounts if only_fresh is enabled
+                only_fresh = (cfg.get("signup") or {}).get("only_fresh", True)
+                if is_registered and only_fresh:
+                    slog("🚫 [OLD ACCOUNT REJECTED] %s is ALREADY REGISTERED on Swiggy (registered=True)! Cancelling & buying a brand new number..." % p)
+                    ss.cancel_async(provider, o, rent_time=rent_time)
+                    continue
+
                 phone, order_id, swuid, tid, sid = p, o, sw, tid1, sid1
                 verify_data = data
-                if is_registered:
-                    slog("✅ [ACCOUNT LOGIN VERIFIED] %s is an existing active Swiggy account. Finalizing session..." % p)
-                else:
-                    slog("✨ [FRESH NUMBER CONFIRMED] %s is a BRAND NEW user (registered=False)! Finalizing signup..." % p)
+                ss.log("✨ [FRESH NUMBER CONFIRMED] %s is a BRAND NEW user (registered=False)! Finalizing signup..." % p)
                 break
             else:
-                slog("⚠️ [%s] Swiggy rejected OTP (HTTP %d status=%s: '%s') -> Cancelling order %s in background & buying next..." % (p, code, status_code, status_msg or str(data)[:100], o))
+                ss.log("⚠️ [%s] Swiggy rejected OTP (HTTP %d status=%s: '%s') -> Cancelling order %s in background & buying next..." % (p, code, status_code, status_msg or str(data)[:100], o))
                 ss.cancel_async(provider, o, rent_time=rent_time)
                 continue
 
         if phone is None or ss.is_cancelled():
             return None
 
-        slog("proceeding to finalize account for %s (order %s)" % (phone, order_id))
+        ss.log("proceeding to finalize account for %s (order %s)" % (phone, order_id))
     else:
         phone = str(phone).strip()
-        slog("sending OTP for override number %s" % phone)
+        ss.log("sending OTP for override number %s" % phone)
         swuid = uuid.uuid4().hex[:16]
         code, data = send_otp(phone, swuid)
         if code != 200 or data.get("statusCode") != 0:
-            slog("sms_otp error: HTTP %d %s" % (code, data))
+            ss.log("sms_otp error: HTTP %d %s" % (code, data))
             if order_id and provider:
                 ss.cancel_async(provider, order_id)
             return None
@@ -592,15 +650,15 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
 
         otp, _src, _raw = ss.get_otp(None, provider, op, phone, order_id, cfg["signup"])
         if not otp:
-            slog("no OTP received for %s" % phone)
+            ss.log("no OTP received for %s" % phone)
             if order_id and provider:
                 ss.cancel_async(provider, order_id)
             return None
-        slog("OTP obtained: %s" % otp)
+        ss.log("OTP obtained: %s" % otp)
 
         code, data = verify_otp(otp, tid, sid, swuid)
         if code != 200 or data.get("statusCode") != 0:
-            slog("verify failed: HTTP %d %s" % (code, data))
+            ss.log("verify failed: HTTP %d %s" % (code, data))
             if order_id and provider:
                 ss.cancel_async(provider, order_id)
             return None
@@ -608,7 +666,7 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
         sess_data = data.get("data") or {}
         is_registered = bool(sess_data.get("registered", False))
         if is_registered:
-            slog("⚠️ Override number %s is already registered." % phone)
+            ss.log("⚠️ Override number %s is already registered." % phone)
         tid = data.get("tid") or (data.get("data") or {}).get("tid") or tid
         sid = data.get("sid") or (data.get("data") or {}).get("sid") or sid
         verify_data = data
@@ -618,22 +676,22 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
     if order_id and provider and hasattr(provider, "set_status"):
         try:
             provider.set_status(order_id, 6)
-            slog("activation marked complete on provider for %s" % phone)
+            ss.log("activation marked complete on provider for %s" % phone)
         except Exception as e:
-            slog("provider completion notice: %s" % e)
+            ss.log("provider completion notice: %s" % e)
         ss.unregister_active_order(order_id)
 
     final_data = verify_data
     if not is_registered:
-        slog("[%s] Submitting name '%s' for brand new account signup..." % (phone, name))
+        ss.log("[%s] Submitting name '%s' for brand new account signup..." % (phone, name))
         try:
             code, reg_data = signup(phone, name, tid, sid, swuid)
             msg = reg_data.get("statusMessage") or reg_data.get("_raw", "")[:120]
-            slog("signup response -> HTTP %d status=%s msg=%s" % (code, reg_data.get("statusCode"), msg))
+            ss.log("signup response -> HTTP %d status=%s msg=%s" % (code, reg_data.get("statusCode"), msg))
             if code == 200 and reg_data.get("statusCode") == 0:
                 final_data = reg_data
         except Exception as e:
-            slog("signup call error: %s" % e)
+            ss.log("signup call error: %s" % e)
 
     account = extract_account_dict(final_data, phone, tid, sid, swuid, name=name)
     account["is_new_user"] = not is_registered
@@ -676,9 +734,9 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
 
     op = cfg.get("otp_provider") or {}
     provider_type = getattr(provider, "cfg", {}).get("type", "nexnum")
-    max_wait_sec = float(op.get("max_wait_sec", 45))
+    max_wait_sec = float(op.get("max_wait_sec", 50))
     poll_interval = float(op.get("poll_interval_sec", 1.2))
-    resend_after_sec = float(op.get("resend_after_sec", 25))
+    resend_after_sec = float(op.get("resend_after_sec", 999))
 
     cfg_workers = cfg.get("workers") or op.get("workers") or 50
     total_workers = min(max(int(cfg_workers), 10), 100)
@@ -726,6 +784,13 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
             is_registered = bool(sess_data.get("registered", False))
             tid1 = data.get("tid") or (data.get("data") or {}).get("tid") or tid0
             sid1 = data.get("sid") or (data.get("data") or {}).get("sid") or sid0
+
+            # Strict Fresh Check: Discard old accounts if only_fresh is enabled
+            only_fresh = (cfg.get("signup") or {}).get("only_fresh", True)
+            if is_registered and only_fresh:
+                slog("🚫 [OLD ACCOUNT REJECTED] %s is ALREADY REGISTERED on Swiggy (registered=True)! Cancelling..." % p)
+                ss.cancel_async(provider, o, rent_time=rent_time)
+                return
 
             # Mark provider completed
             if hasattr(provider, "set_status"):

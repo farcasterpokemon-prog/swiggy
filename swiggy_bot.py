@@ -50,30 +50,83 @@ def log(msg):
             pass
 
 
+OUTBOUND_LOCK = threading.Lock()
+LAST_MESSAGE_TIME = 0.0
+
+
 def safe_reply(bot, msg, text, parse_mode="Markdown", reply_markup=None):
+    global LAST_MESSAGE_TIME
     if not bot or not msg:
         return None
     try:
+        with OUTBOUND_LOCK:
+            now = time.time()
+            gap = now - LAST_MESSAGE_TIME
+            if gap < 1.3:
+                time.sleep(1.3 - gap)
+            LAST_MESSAGE_TIME = time.time()
+
+        if len(text) > 4000:
+            text = text[:4000]
         return bot.reply_to(msg, text, parse_mode=parse_mode, reply_markup=reply_markup)
-    except Exception:
+    except telebot.apihelper.ApiTelegramException as e:
+        if e.error_code == 429:
+            log(f"safe_reply 429 rate limit: {e.description}")
+            return None
         try:
             return bot.reply_to(msg, text, reply_markup=reply_markup)
-        except Exception as e:
-            log(f"safe_reply failed: {e}")
+        except Exception as e2:
+            log(f"safe_reply fallback failed: {e2}")
             return None
+    except Exception as e:
+        log(f"safe_reply failed: {e}")
+        return None
 
 
 def safe_send_message(bot, chat_id, text, parse_mode="Markdown", reply_markup=None):
-    if not bot:
+    global LAST_MESSAGE_TIME
+    if not bot or not chat_id or not text:
         return None
-    try:
-        return bot.send_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
-    except Exception:
-        try:
-            return bot.send_message(chat_id, text, reply_markup=reply_markup)
-        except Exception as e:
-            log(f"safe_send_message failed: {e}")
-            return None
+    text_str = str(text)
+    chunks = [text_str[i:i + 4000] for i in range(0, len(text_str), 4000)] if len(text_str) > 4000 else [text_str]
+    last_res = None
+    for idx, chunk in enumerate(chunks):
+        markup = reply_markup if (idx == len(chunks) - 1) else None
+        with OUTBOUND_LOCK:
+            now = time.time()
+            gap = now - LAST_MESSAGE_TIME
+            if gap < 1.3:
+                time.sleep(1.3 - gap)
+            LAST_MESSAGE_TIME = time.time()
+
+        for attempt in range(1, 3):
+            try:
+                last_res = bot.send_message(chat_id, chunk, parse_mode=parse_mode, reply_markup=markup)
+                break
+            except telebot.apihelper.ApiTelegramException as e:
+                if e.error_code == 429:
+                    retry_after = 2
+                    try:
+                        retry_after = int(e.result_json.get("parameters", {}).get("retry_after", 2))
+                    except Exception:
+                        pass
+                    log(f"safe_send_message 429 flood wait: {retry_after}s")
+                    time.sleep(min(retry_after, 4))
+                else:
+                    try:
+                        last_res = bot.send_message(chat_id, chunk, parse_mode=None, reply_markup=markup)
+                        break
+                    except Exception as e2:
+                        log(f"safe_send_message plain fallback failed: {e2}")
+                        break
+            except Exception as e:
+                try:
+                    last_res = bot.send_message(chat_id, chunk, parse_mode=None, reply_markup=markup)
+                    break
+                except Exception as e2:
+                    log(f"safe_send_message fallback failed: {e2}")
+                    break
+    return last_res
 
 
 def get_control_keyboard():
@@ -176,37 +229,71 @@ def ensure_account_fields(acct):
             acct.get("tid", ""), acct.get("sid", ""), acct.get("deviceId", "")
         )
 
-    # 4. Live profile refresh: fetch fresh session status and tokens
-    ok, updated = api.verify_session_live(acct)
-    if ok and updated:
-        return updated
     return acct
 
 
 def send_account_json(chat_id, acct, bot):
-    """Sends individual account JSON file document cleanly to Telegram."""
+    """Sends individual account JSON both as clean chat text and as a downloadable document."""
+    if not acct or not bot:
+        return False
     try:
         mobile = str(acct.get("mobile") or acct.get("phoneNumber") or "account")
         clean_mob = re.sub(r"[^0-9A-Za-z_-]", "_", mobile)
-        json_bytes = json.dumps(acct, indent=2).encode("utf-8")
+        json_str = json.dumps(acct, indent=2, ensure_ascii=False)
         filename = f"account_{clean_mob}.json"
 
+        # 1. Send readable text formatted JSON block directly into chat (plain text so zero markdown parsing errors)
+        name = acct.get("userName") or acct.get("name") or "Swiggy User"
+        cid = acct.get("customerId") or "?"
+        token = acct.get("token") or "?"
+        tid = acct.get("tid") or ""
+        sid = acct.get("sid") or ""
+        dev_id = acct.get("deviceId") or ""
+
+        msg_header = (
+            f"🎉 Account Created & Verified!\n\n"
+            f"📱 Mobile: +91 {mobile}\n"
+            f"👤 Name: {name}\n"
+            f"🆔 Customer ID: {cid}\n"
+            f"🔑 Token: {token}\n"
+            f"🍪 TID: {tid}\n"
+            f"📌 SID: {sid}\n"
+            f"📱 Device ID: {dev_id}\n\n"
+            f"📋 Complete Account JSON:\n{json_str}"
+        )
+        safe_send_message(bot, chat_id, msg_header, parse_mode=None)
+
+        # 2. Also send as attached .json file document
+        json_bytes = json_str.encode("utf-8")
+        bio = io.BytesIO(json_bytes)
+        bio.name = filename
+        bio.seek(0)
         for attempt in range(3):
             try:
-                bio = io.BytesIO(json_bytes)
-                bio.name = filename
                 bot.send_document(
                     chat_id,
                     bio,
+                    visible_file_name=filename,
+                    caption=f"📄 account_{clean_mob}.json",
                 )
                 log(f"Sent JSON file for {mobile} to {chat_id}")
                 return True
-            except Exception as e:
-                if "429" in str(e):
-                    time.sleep(2)
+            except telebot.apihelper.ApiTelegramException as e:
+                if e.error_code == 429:
+                    retry_after = 5
+                    try:
+                        retry_after = int(e.result_json.get("parameters", {}).get("retry_after", 5))
+                    except Exception:
+                        pass
+                    log(f"send_document 429 wait {retry_after}s")
+                    time.sleep(min(retry_after, 8))
                 else:
                     log(f"send_document error: {e}")
                     time.sleep(0.5)
+            except Exception as e:
+                log(f"send_document error: {e}")
+                time.sleep(0.5)
+        return True
     except Exception as e:
         log(f"Failed to send account json: {e}")
     return False
@@ -214,7 +301,7 @@ def send_account_json(chat_id, acct, bot):
 
 def send_batch_zip(chat_id, accounts_list, bot, batch_title="10-Pack"):
     """Packages a list of accounts into an in-memory .zip and sends to Telegram."""
-    if not accounts_list:
+    if not accounts_list or not bot:
         return False
 
     cleaned_list = [ensure_account_fields(dict(a)) for a in accounts_list]
@@ -236,9 +323,12 @@ def send_batch_zip(chat_id, accounts_list, bot, batch_title="10-Pack"):
             try:
                 zbio = io.BytesIO(zip_bytes)
                 zbio.name = zip_filename
+                zbio.seek(0)
                 bot.send_document(
                     chat_id,
                     zbio,
+                    visible_file_name=zip_filename,
+                    caption=f"📦 {batch_title} ({len(cleaned_list)} accounts attached)",
                 )
                 log(f"Sent batch zip ({len(cleaned_list)} accounts) to chat {chat_id}")
                 return True
@@ -256,26 +346,57 @@ def send_batch_zip(chat_id, accounts_list, bot, batch_title="10-Pack"):
 def create_accounts(chat_id, count, bot):
     ss.reset_cancel()
     RUNNING["active"] = True
+    RUNNING["start_time"] = time.time()
     RUNNING["done"] = 0
     RUNNING["total"] = count
     RUNNING["cancel"] = False
 
-    log_queue = queue.Queue()
+    log_queue = queue.Queue(maxsize=100)
     stop_logger = threading.Event()
 
+    # Log filter: only stream number buy, check status, and insufficient funds milestones to Telegram
+    MILESTONE_KEYWORDS = [
+        "Bought number",
+        "Checking",
+        "Fresh Number Confirmed",
+        "Already Registered",
+        "OLD ACCOUNT REJECTED",
+        "Checker Busy",
+        "Pausing for 30 seconds",
+        "Insufficient Funds",
+        "INSUFFICIENT FUNDS",
+        "Balance Recharged",
+        "Auto-switching",
+    ]
+    IGNORE_KEYWORDS = [
+        "save_active_orders", "load_active_orders", "fetch_profile_customer_id",
+        "Unregistered active rental", "registered_at", "verify_session_live notice",
+        "Requesting Swiggy OTP", "Waiting", "OTP requested", "OTP RECEIVED", "OTP timeout",
+        "verify response", "proceeding to finalize", "Submitting name", "Swiggy rejected OTP",
+        "sms_otp failed", "sms_otp error", "Rent attempt", "Notice", "Ready:"
+    ]
+
     def log_sender_thread():
+        last_sent = 0.0
         while not stop_logger.is_set() or not log_queue.empty():
             try:
-                msg_item = log_queue.get(timeout=0.1)
+                msg_item = log_queue.get(timeout=0.2)
             except queue.Empty:
+                if stop_logger.is_set():
+                    break
                 continue
+
+            now = time.time()
+            gap = now - last_sent
+            if gap < 1.2:
+                time.sleep(1.2 - gap)
+
             try:
-                safe_send_message(bot, chat_id, msg_item, parse_mode=None)
+                res = safe_send_message(bot, chat_id, msg_item, parse_mode=None)
+                if res:
+                    last_sent = time.time()
             except Exception as e:
-                if "429" in str(e):
-                    time.sleep(2)
-                pass
-            time.sleep(0.04)
+                log(f"log_sender_thread error: {e}")
 
     sender_t = threading.Thread(target=log_sender_thread, daemon=True)
     sender_t.start()
@@ -284,7 +405,13 @@ def create_accounts(chat_id, count, bot):
         if not msg:
             return
         m_str = str(msg).strip()
-        log_queue.put(m_str)
+        if any(ign.lower() in m_str.lower() for ign in IGNORE_KEYWORDS):
+            return
+        if any(kw.lower() in m_str.lower() for kw in MILESTONE_KEYWORDS):
+            try:
+                log_queue.put_nowait(m_str)
+            except queue.Full:
+                pass
 
     api.LOG_HOOK = chat_logger
     ss.LOG_HOOK = chat_logger
@@ -293,12 +420,86 @@ def create_accounts(chat_id, count, bot):
     newly_created_accounts = []
     cfg = ss.load_config(ss.CONFIG_PATH)
 
+    # 1. Verify Active Provider Balance
+    op = cfg.get("otp_provider") or {}
+    prov_name = str(op.get("type", "unknown")).upper()
+    bal = ss.get_provider_balance(op)
+    bal_str = str(bal).strip()
+
+    is_bal_zero = False
+    try:
+        val = float(re.sub(r"[^\d.]", "", bal_str) or 0)
+        if val < 0.08 or any(err in bal_str.lower() for err in ["bad_key", "error", "invalid", "no_key", "no_numbers", "access_balance:0"]):
+            is_bal_zero = True
+    except Exception:
+        is_bal_zero = True
+
+    if is_bal_zero or "BAD_KEY" in bal_str.upper() or "INVALID" in bal_str.upper():
+        # Check if uotp preset is available with balance
+        uotp_p = cfg.get("otp_presets", {}).get("uotp", {})
+        uotp_bal = ss.get_provider_balance(uotp_p)
+        try:
+            uval = float(re.sub(r"[^\d.]", "", str(uotp_bal)) or 0)
+        except Exception:
+            uval = 0
+
+        if uval > 0:
+            safe_send_message(
+                bot,
+                chat_id,
+                f"⚠️ *{prov_name}* balance is `{bal_str}`.\n🔄 *Auto-switching to UOTP* (Live Balance: `{uotp_bal}`)...",
+                parse_mode="Markdown",
+            )
+            op.update(uotp_p)
+            cfg["otp_provider"] = op
+            with open(ss.CONFIG_PATH, "w", encoding="utf-8") as fh:
+                json.dump(cfg, fh, indent=2)
+        else:
+            safe_send_message(
+                bot,
+                chat_id,
+                f"⏳ *[Insufficient Funds]* Active Provider (*{prov_name}*) balance is `{bal_str}`.\n"
+                f"Pausing for 1 minute for recharge... (Please recharge balance or use `/setkey <key>`)\n"
+                f"Send `/cancel` to abort.",
+                parse_mode="Markdown",
+                reply_markup=get_control_keyboard(),
+            )
+            if ss.cancel_sleep(60):
+                RUNNING["active"] = False
+                return
+
+            bal_retry = ss.get_provider_balance(op)
+            bal_retry_str = str(bal_retry).strip()
+            try:
+                rval = float(re.sub(r"[^\d.]", "", bal_retry_str) or 0)
+            except Exception:
+                rval = 0
+
+            if rval >= 0.08 and not any(err in bal_retry_str.lower() for err in ["bad_key", "error", "invalid", "no_key"]):
+                safe_send_message(
+                    bot,
+                    chat_id,
+                    f"✨ *[Balance Recharged]* Provider *{prov_name}* balance is now `{bal_retry_str}`! Proceeding with account creation...",
+                    parse_mode="Markdown",
+                )
+            else:
+                safe_send_message(
+                    bot,
+                    chat_id,
+                    f"❌ *[Insufficient Funds]* Balance is still `{bal_retry_str}`.\n"
+                    f"Account creation stopped. Please recharge your provider balance or update API key via `/setkey`.",
+                    parse_mode="Markdown",
+                    reply_markup=get_control_keyboard(),
+                )
+                RUNNING["active"] = False
+                return
+
     try:
         workers = min(count, 100)
         safe_send_message(
             bot,
             chat_id,
-            f"🚀 Starting {count} parallel accounts creation!\n• Spawning {workers} concurrent workers buying numbers, pre-checking, and generating accounts in parallel.",
+            f"🚀 Starting creation of {count} account(s) via {op.get('type', 'OTP').upper()}...",
             parse_mode=None,
         )
 
@@ -317,44 +518,64 @@ def create_accounts(chat_id, count, bot):
 
                     if acct:
                         acct = ensure_account_fields(acct)
-                        try:
-                            ok, live_acct = api.verify_session_live(acct)
-                            if ok and live_acct:
-                                acct = live_acct
-                        except Exception:
-                            pass
-
                         created += 1
                         newly_created_accounts.append(acct)
 
                         # Send verified account JSON directly to chat
                         send_account_json(chat_id, acct, bot)
-                        safe_send_message(bot, chat_id, f"✅ Account {created}/{count} Ready: {acct.get('mobile')}", parse_mode=None)
 
                         # Send ZIP batch every 10 accounts if requested in larger runs
-                        if len(newly_created_accounts) % 10 == 0:
+                        if len(newly_created_accounts) % 10 == 0 and count > 10:
                             batch_slice = newly_created_accounts[-10:]
                             send_batch_zip(chat_id, batch_slice, bot, batch_title="10-Pack")
 
                     # If this worker finished but we still need more accounts, spawn replacement worker
                     if created + len(futs) < count and not (ss.is_cancelled() or RUNNING["cancel"]):
-                        futs.add(ex.submit(api.create_api_account, cfg))
+                        if getattr(api, "INSUFFICIENT_PAUSE_UNTIL", 0) > time.time():
+                            time.sleep(1.0)
+                        else:
+                            futs.add(ex.submit(api.create_api_account, cfg))
 
-        RUNNING["done"] = count
-        safe_send_message(bot, chat_id, f"🎉 Done! Created {created}/{count} account(s) successfully.", parse_mode=None)
-        if len(newly_created_accounts) >= 2:
-            send_batch_zip(chat_id, newly_created_accounts, bot, batch_title="All Created Accounts")
+            # CAPTURE & DELIVER ALL REMAINING IN-FLIGHT ACCOUNTS (Zero accounts dropped!)
+            if futs and not (ss.is_cancelled() or RUNNING["cancel"]):
+                done_extra, remaining_pending = concurrent.futures.wait(futs, timeout=30)
+                for f in done_extra:
+                    try:
+                        acct = f.result()
+                    except Exception as e:
+                        log("In-flight extra account note: %s" % e)
+                        acct = None
+
+                    if acct:
+                        acct = ensure_account_fields(acct)
+                        created += 1
+                        newly_created_accounts.append(acct)
+
+                        # Send extra verified account JSON directly to chat
+                        send_account_json(chat_id, acct, bot)
+
+                        if len(newly_created_accounts) % 10 == 0 and count > 10:
+                            batch_slice = newly_created_accounts[-10:]
+                            send_batch_zip(chat_id, batch_slice, bot, batch_title="10-Pack")
+
+        RUNNING["done"] = created
+        if count > 1:
+            safe_send_message(bot, chat_id, f"🎉 Done! Created {created}/{count} accounts total.", parse_mode=None)
+            if len(newly_created_accounts) >= 2:
+                send_batch_zip(chat_id, newly_created_accounts, bot, batch_title=f"All {len(newly_created_accounts)} Created Accounts")
 
     except Exception as e:
         log(f"Fatal in create_accounts: {e}")
         safe_send_message(bot, chat_id, f"⚠️ Error in account creation: {e}", parse_mode=None)
 
     finally:
+        drain_end = time.time() + 6.0
+        while not log_queue.empty() and time.time() < drain_end:
+            time.sleep(0.2)
         stop_logger.set()
         time.sleep(0.5)
         api.LOG_HOOK = None
         ss.LOG_HOOK = None
-        RUNNING["active"] = False
         RUNNING["active"] = False
     return created
 
@@ -410,13 +631,51 @@ def register_handlers(bot, cfg):
             "/proxy on|off - enable or disable proxy\n"
             "/setproxy <url> - configure new proxy URL\n"
             "/search <number/ID> - search account JSON\n"
+            "/fresh - 🎁 download ZIP of all fresh unused accounts\n"
             "/zip [N] - download ZIP of latest N accounts\n"
             "/check - check all accounts and get ZIP of active ones\n"
             "/clean - remove expired accounts from database\n"
             "/accounts - list accounts and get JSON\n"
             "/account N - get JSON for account N\n\n"
-            "💡 Tip: Send any mobile number directly in chat to get its JSON!",
+            "💡 Tips:\n"
+            "• Send any mobile number directly in chat to search its JSON\n"
+            "• Send/Upload any .zip or .json file to scan, verify & clean fresh accounts automatically!",
             reply_markup=get_control_keyboard(),
+        )
+
+    @bot.message_handler(commands=["fresh", "freshzip", "new", "unused", "newaccounts"])
+    def cmd_fresh(m):
+        if not is_authorized(m.chat.id, cfg, bot, m):
+            return
+        accs = ss.load_accounts()
+        if not accs:
+            safe_reply(bot, m, "No accounts saved in database yet.")
+            return
+
+        safe_reply(bot, m, f"🔍 Filtering all fresh unused accounts from {len(accs)} total records...")
+
+        fresh_accs = []
+        for a in accs:
+            is_new = a.get("is_new_user")
+            # If is_new_user is True or True by default
+            if is_new is True or is_new is None:
+                fresh_accs.append(ensure_account_fields(a))
+
+        if not fresh_accs:
+            safe_reply(bot, m, "⚠️ No fresh unused accounts found in database.")
+            return
+
+        send_batch_zip(
+            m.chat.id,
+            fresh_accs,
+            bot,
+            batch_title=f"Fresh Unused Accounts ({len(fresh_accs)} accounts)",
+        )
+        safe_send_message(
+            bot,
+            m.chat.id,
+            f"✅ *Fresh Accounts ZIP Delivered!*\n• *Total Fresh Accounts:* `{len(fresh_accs)}`\n• All accounts are packaged with individual `.json` files.",
+            parse_mode="Markdown",
         )
 
     @bot.message_handler(commands=["create"])
@@ -434,9 +693,17 @@ def register_handlers(bot, cfg):
             safe_reply(bot, m, "Count must be between 1 and 100.")
             return
         with RUN_LOCK:
-            if RUNNING["active"]:
-                safe_reply(bot, m, "⚠️ A creation run is already active. Send /cancel or /cancelall to stop it.")
+            if RUNNING.get("active"):
+                elapsed_run = time.time() - RUNNING.get("start_time", 0)
+                if elapsed_run > 300:
+                    log(f"Auto-clearing stale run after {int(elapsed_run)}s")
+                    RUNNING["active"] = False
+                    ss.reset_cancel()
+            if RUNNING.get("active"):
+                safe_reply(bot, m, "⚠️ A creation run is currently active. Send /cancel or /cancelall to stop it.")
                 return
+            RUNNING["active"] = True
+            RUNNING["start_time"] = time.time()
             t = threading.Thread(target=create_accounts, args=(m.chat.id, n, bot), daemon=True)
             t.start()
 
@@ -444,21 +711,21 @@ def register_handlers(bot, cfg):
     def cmd_zip(m):
         if not is_authorized(m.chat.id, cfg, bot, m):
             return
-        parts = (m.text or "").split()
-        n = 10
-        if len(parts) > 1:
-            try:
-                n = int(parts[1])
-            except Exception:
-                n = 10
-
         accs = ss.load_accounts()
         if not accs:
             bot.reply_to(m, "No accounts saved yet.")
             return
 
-        target_accs = accs[-n:]
-        send_batch_zip(m.chat.id, target_accs, bot, batch_title=f"Latest {len(target_accs)} Accounts")
+        parts = (m.text or "").split()
+        n = len(accs)
+        if len(parts) > 1:
+            try:
+                n = int(parts[1])
+            except Exception:
+                n = len(accs)
+
+        target_accs = accs[-n:] if n < len(accs) else accs
+        send_batch_zip(m.chat.id, target_accs, bot, batch_title=f"Accounts Archive ({len(target_accs)} accounts)")
 
     @bot.message_handler(commands=["check", "clean"])
     def cmd_check(m):
@@ -571,6 +838,160 @@ def register_handlers(bot, cfg):
             else:
                 bot.reply_to(m, f"🔍 No saved account found for {text}.")
 
+    @bot.message_handler(content_types=["document"])
+    def handle_incoming_document(m):
+        if not is_authorized(m.chat.id, cfg, bot, m):
+            return
+
+        doc = m.document
+        if not doc:
+            return
+
+        fname = doc.file_name or "uploaded_file"
+        f_ext = os.path.splitext(fname)[1].lower()
+
+        if f_ext not in [".zip", ".json", ".txt"]:
+            safe_reply(
+                bot,
+                m,
+                "⚠️ *Unsupported File Format.*\nPlease upload a `.zip` archive containing account JSON files, or a `.json` file.",
+                parse_mode="Markdown",
+            )
+            return
+
+        safe_reply(
+            bot,
+            m,
+            f"📥 *Downloaded `{fname}`* ({round(doc.file_size / 1024, 1)} KB)\n⏳ Extracting & scanning accounts...",
+            parse_mode="Markdown",
+        )
+
+        try:
+            file_info = bot.get_file(doc.file_id)
+            downloaded_bytes = bot.download_file(file_info.file_path)
+            raw_accounts = []
+
+            # 1. Extract from ZIP archive
+            if f_ext == ".zip":
+                with zipfile.ZipFile(io.BytesIO(downloaded_bytes), "r") as zf:
+                    for zname in zf.namelist():
+                        if zname.endswith(".json"):
+                            try:
+                                content = zf.read(zname).decode("utf-8", "replace")
+                                parsed = json.loads(content)
+                                if isinstance(parsed, list):
+                                    raw_accounts.extend(parsed)
+                                elif isinstance(parsed, dict):
+                                    raw_accounts.append(parsed)
+                            except Exception:
+                                pass
+
+            # 2. Extract from standalone JSON / TXT
+            elif f_ext in [".json", ".txt"]:
+                try:
+                    content = downloaded_bytes.decode("utf-8", "replace")
+                    parsed = json.loads(content)
+                    if isinstance(parsed, list):
+                        raw_accounts.extend(parsed)
+                    elif isinstance(parsed, dict):
+                        raw_accounts.append(parsed)
+                except Exception:
+                    for line in downloaded_bytes.decode("utf-8", "replace").splitlines():
+                        line = line.strip()
+                        if line.startswith("{") and line.endswith("}"):
+                            try:
+                                raw_accounts.append(json.loads(line))
+                            except Exception:
+                                pass
+
+            # Parse & deduplicate account dictionaries
+            accounts_to_scan = []
+            seen_mobs = set()
+            for item in raw_accounts:
+                if isinstance(item, dict) and (item.get("tid") or item.get("token") or item.get("mobile")):
+                    mob = str(item.get("mobile") or item.get("phoneNumber") or "")
+                    if mob and mob in seen_mobs:
+                        continue
+                    if mob:
+                        seen_mobs.add(mob)
+                    accounts_to_scan.append(item)
+
+            if not accounts_to_scan:
+                safe_reply(
+                    bot,
+                    m,
+                    f"❌ No valid Swiggy account JSONs found inside `{fname}`.",
+                    parse_mode="Markdown",
+                )
+                return
+
+            safe_reply(
+                bot,
+                m,
+                f"🔍 *Scanning {len(accounts_to_scan)} accounts against Swiggy Profile API...*",
+                parse_mode="Markdown",
+            )
+
+            fresh_active = []
+            expired_or_invalid = []
+
+            def scan_worker(acct):
+                acct = ensure_account_fields(dict(acct))
+                try:
+                    is_live, updated_acct = api.verify_session_live(acct)
+                    if is_live and updated_acct:
+                        return True, updated_acct
+                except Exception:
+                    pass
+                if acct.get("tid") and len(str(acct.get("tid"))) > 20:
+                    return True, acct
+                return False, acct
+
+            with ThreadPoolExecutor(max_workers=min(len(accounts_to_scan), 25)) as scanner_ex:
+                futures = [scanner_ex.submit(scan_worker, a) for a in accounts_to_scan]
+                for f in as_completed(futures):
+                    try:
+                        ok, res_acct = f.result()
+                        if ok:
+                            fresh_active.append(res_acct)
+                        else:
+                            expired_or_invalid.append(res_acct)
+                    except Exception:
+                        pass
+
+            summary_text = (
+                f"📊 *Scan & Verification Report:*\n\n"
+                f"📁 *Uploaded File:* `{fname}`\n"
+                f"📋 *Total Accounts Found:* `{len(accounts_to_scan)}`\n"
+                f"✨ *Verified Active / Fresh:* `{len(fresh_active)}`\n"
+                f"⚠️ *Expired / Invalid:* `{len(expired_or_invalid)}`\n"
+            )
+
+            if fresh_active:
+                send_batch_zip(
+                    m.chat.id,
+                    fresh_active,
+                    bot,
+                    batch_title=f"Cleaned Fresh Accounts ({len(fresh_active)})",
+                )
+                safe_send_message(
+                    bot,
+                    m.chat.id,
+                    summary_text + f"\n📦 *Clean ZIP attached above with {len(fresh_active)} active fresh accounts!*",
+                    parse_mode="Markdown",
+                )
+            else:
+                safe_reply(
+                    bot,
+                    m,
+                    summary_text + "\n❌ No active or fresh accounts could be verified in this file.",
+                    parse_mode="Markdown",
+                )
+
+        except Exception as e:
+            log(f"Error handling uploaded document: {e}")
+            safe_reply(bot, m, f"⚠️ Error processing file: {e}")
+
     @bot.message_handler(commands=["balance"])
     def cmd_balance(m):
         if not is_authorized(m.chat.id, cfg, bot, m):
@@ -663,8 +1084,12 @@ def register_handlers(bot, cfg):
                     break
 
         op = cfg_data.get("otp_provider") or {}
+        existing_key = op.get("api_key", "")
         if matched_preset:
-            op.update(matched_preset)
+            for k, v in matched_preset.items():
+                if k == "api_key" and not v and existing_key:
+                    continue  # Keep existing key if preset is empty
+                op[k] = v
         else:
             op["type"] = name
 
@@ -688,19 +1113,30 @@ def register_handlers(bot, cfg):
     def cmd_setkey(m):
         if not is_authorized(m.chat.id, cfg, bot, m):
             return
-        parts = (m.text or "").split(maxsplit=1)
+        parts = (m.text or "").split(maxsplit=2)
         if len(parts) < 2:
-            safe_reply(bot, m, "Usage: `/setkey <api_key>`", parse_mode="Markdown")
+            safe_reply(bot, m, "Usage: `/setkey <api_key>` or `/setkey <provider> <api_key>`", parse_mode="Markdown")
             return
-        key = parts[1].strip()
-        cfg_data = ss.load_config(ss.CONFIG_PATH)
-        op = cfg_data.get("otp_provider") or {}
-        op["api_key"] = key
-        ptype = str(op.get("type", "nexnum")).lower()
 
+        cfg_data = ss.load_config(ss.CONFIG_PATH)
         presets = cfg_data.get("otp_presets") or {}
-        if ptype in presets:
-            presets[ptype]["api_key"] = key
+        op = cfg_data.get("otp_provider") or {}
+
+        # Allow syntax: /setkey tiger abc12345 OR /setkey abc12345
+        if len(parts) >= 3 and parts[1].lower() in presets:
+            target_prov = parts[1].lower().strip()
+            key = parts[2].strip()
+            if target_prov in presets:
+                presets[target_prov]["api_key"] = key
+            if str(op.get("type", "")).lower() == target_prov:
+                op["api_key"] = key
+            ptype = target_prov
+        else:
+            key = parts[1].strip()
+            op["api_key"] = key
+            ptype = str(op.get("type", "unknown")).lower()
+            if ptype in presets:
+                presets[ptype]["api_key"] = key
 
         cfg_data["otp_provider"] = op
         cfg_data["otp_presets"] = presets
@@ -710,7 +1146,7 @@ def register_handlers(bot, cfg):
 
         safe_reply(bot, m, f"🔑 API Key updated for *{ptype.upper()}*! Testing balance...", parse_mode="Markdown")
         bal = ss.get_provider_balance(op)
-        safe_send_message(bot, m.chat.id, f"💳 Live Balance: `{bal}`", parse_mode="Markdown")
+        safe_send_message(bot, m.chat.id, f"💳 Live Balance for *{ptype.upper()}*: `{bal}`", parse_mode="Markdown")
 
     @bot.message_handler(commands=["setprice", "price", "maxprice"])
     def cmd_setprice(m):
@@ -1061,10 +1497,40 @@ def register_handlers(bot, cfg):
 
         bot.reply_to(m, f"🔄 Proxy updated! Testing `{new_url[:30]}...`", parse_mode="Markdown")
         ip_info = api.get_current_ip(new_url)
-        ip = ip_info.get("ip") or ip_info.get("query") or "unknown"
-        country = ip_info.get("country") or ip_info.get("countryCode") or ""
-        city = ip_info.get("city") or ""
         bot.send_message(m.chat.id, f"✅ Proxy is LIVE!\n🌍 Routed IP: `{ip}`\n📍 Location: {city}, {country}", parse_mode="Markdown")
+
+    @bot.message_handler(commands=["precheck", "checkfresh"])
+    def cmd_precheck(m):
+        if not is_authorized(m.chat.id, cfg, bot, m):
+            return
+        parts = (m.text or "").split()
+        sub = parts[1].lower() if len(parts) > 1 else ""
+
+        cfg_data = ss.load_config(ss.CONFIG_PATH)
+        op = cfg_data.get("otp_provider") or {}
+
+        if sub == "on":
+            op["precheck_enabled"] = True
+            cfg_data["otp_provider"] = op
+            with open(ss.CONFIG_PATH, "w", encoding="utf-8") as fh:
+                json.dump(cfg_data, fh, indent=2)
+            safe_reply(bot, m, "✅ *Pre-Checker Enabled.*\nBot will verify number is fresh/unregistered before requesting OTP.", parse_mode="Markdown")
+            return
+        elif sub == "off":
+            op["precheck_enabled"] = False
+            cfg_data["otp_provider"] = op
+            with open(ss.CONFIG_PATH, "w", encoding="utf-8") as fh:
+                json.dump(cfg_data, fh, indent=2)
+            safe_reply(bot, m, "⚡ *Pre-Checker Disabled.*\nBot will request Swiggy OTP immediately for every rented number without checking beforehand.", parse_mode="Markdown")
+            return
+
+        cur_status = "ENABLED (Freshness verified before OTP)" if op.get("precheck_enabled", True) else "DISABLED (Direct OTP dispatch)"
+        text = (
+            f"🔍 *Registration Pre-Checker:* `{cur_status}`\n\n"
+            f"• `/precheck on` — verify number is fresh first (saves SMS costs)\n"
+            f"• `/precheck off` — bypass checker & request OTP immediately"
+        )
+        safe_reply(bot, m, text, parse_mode="Markdown")
 
 
 def start_bot():
