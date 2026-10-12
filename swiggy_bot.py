@@ -299,14 +299,17 @@ def send_account_json(chat_id, acct, bot):
     return False
 
 
-def send_batch_zip(chat_id, accounts_list, bot, batch_title="10-Pack"):
+def send_batch_zip(chat_id, accounts_list, bot, batch_title="10-Pack", zip_name=None):
     """Packages a list of accounts into an in-memory .zip and sends to Telegram."""
     if not accounts_list or not bot:
         return False
 
     cleaned_list = [ensure_account_fields(dict(a)) for a in accounts_list]
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    zip_filename = f"swiggy_accounts_{len(cleaned_list)}_pack_{timestamp}.zip"
+    if zip_name:
+        zip_filename = f"{zip_name}_{timestamp}.zip"
+    else:
+        zip_filename = f"swiggy_accounts_{len(cleaned_list)}_pack_{timestamp}.zip"
 
     try:
         zip_buf = io.BytesIO()
@@ -505,7 +508,11 @@ def create_accounts(chat_id, count, bot):
 
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futs = set(ex.submit(api.create_api_account, cfg) for _ in range(workers))
-            while futs and created < count and not (ss.is_cancelled() or RUNNING["cancel"]):
+            while futs and not (ss.is_cancelled() or RUNNING["cancel"]):
+                fresh_count = sum(1 for a in newly_created_accounts if a.get("is_new_user", True))
+                if fresh_count >= count or len(newly_created_accounts) >= count + 10:
+                    break
+
                 done, futs = concurrent.futures.wait(futs, return_when=concurrent.futures.FIRST_COMPLETED)
                 for f in done:
                     if ss.is_cancelled() or RUNNING["cancel"]:
@@ -524,13 +531,9 @@ def create_accounts(chat_id, count, bot):
                         # Send verified account JSON directly to chat
                         send_account_json(chat_id, acct, bot)
 
-                        # Send ZIP batch every 10 accounts if requested in larger runs
-                        if len(newly_created_accounts) % 10 == 0 and count > 10:
-                            batch_slice = newly_created_accounts[-10:]
-                            send_batch_zip(chat_id, batch_slice, bot, batch_title="10-Pack")
-
-                    # If this worker finished but we still need more accounts, spawn replacement worker
-                    if created + len(futs) < count and not (ss.is_cancelled() or RUNNING["cancel"]):
+                    # If this worker finished but we still need more fresh accounts, spawn replacement worker
+                    fresh_in_progress = sum(1 for a in newly_created_accounts if a.get("is_new_user", True))
+                    if fresh_in_progress + len(futs) < count and not (ss.is_cancelled() or RUNNING["cancel"]):
                         if getattr(api, "INSUFFICIENT_PAUSE_UNTIL", 0) > time.time():
                             time.sleep(1.0)
                         else:
@@ -554,15 +557,44 @@ def create_accounts(chat_id, count, bot):
                         # Send extra verified account JSON directly to chat
                         send_account_json(chat_id, acct, bot)
 
-                        if len(newly_created_accounts) % 10 == 0 and count > 10:
-                            batch_slice = newly_created_accounts[-10:]
-                            send_batch_zip(chat_id, batch_slice, bot, batch_title="10-Pack")
-
         RUNNING["done"] = created
-        if count > 1:
-            safe_send_message(bot, chat_id, f"🎉 Done! Created {created}/{count} accounts total.", parse_mode=None)
-            if len(newly_created_accounts) >= 2:
-                send_batch_zip(chat_id, newly_created_accounts, bot, batch_title=f"All {len(newly_created_accounts)} Created Accounts")
+        fresh_accs = [a for a in newly_created_accounts if a.get("is_new_user", True)]
+        old_accs = [a for a in newly_created_accounts if not a.get("is_new_user", True)]
+
+        # 1. Deliver Fresh Accounts ZIP
+        if fresh_accs:
+            send_batch_zip(
+                chat_id,
+                fresh_accs,
+                bot,
+                batch_title=f"✨ Fresh Accounts ({len(fresh_accs)} accounts)",
+                zip_name=f"fresh_new_accounts_{len(fresh_accs)}",
+            )
+
+        # 2. Deliver Old / Recycled Accounts ZIP
+        if old_accs:
+            send_batch_zip(
+                chat_id,
+                old_accs,
+                bot,
+                batch_title=f"♻️ Old Accounts ({len(old_accs)} accounts)",
+                zip_name=f"old_accounts_{len(old_accs)}",
+            )
+
+        # 3. Final summary message
+        summary_msg = (
+            f"🎉 *Account Creation Complete!*\n\n"
+            f"• *Total Delivered:* `{len(newly_created_accounts)}`\n"
+            f"• ✨ *Fresh Accounts:* `{len(fresh_accs)}`\n"
+            f"• ♻️ *Old Accounts:* `{len(old_accs)}`\n\n"
+        )
+        if fresh_accs and old_accs:
+            summary_msg += "📦 *Delivered 2 separate ZIP archives above:*\n1️⃣ `Fresh Accounts ZIP`\n2️⃣ `Old Accounts ZIP`"
+        elif fresh_accs:
+            summary_msg += "📦 *Delivered `Fresh Accounts ZIP` above* (100% fresh numbers!)."
+        elif old_accs:
+            summary_msg += "📦 *Delivered `Old Accounts ZIP` above*."
+        safe_send_message(bot, chat_id, summary_msg, parse_mode="Markdown")
 
     except Exception as e:
         log(f"Fatal in create_accounts: {e}")
@@ -639,6 +671,7 @@ def register_handlers(bot, cfg):
             "/setproxy <url> - configure new proxy URL\n"
             "/search <number/ID> - search account JSON\n"
             "/fresh - 🎁 download ZIP of all fresh unused accounts\n"
+            "/old - ♻️ download ZIP of all old/recycled accounts\n"
             "/zip [N] - download ZIP of latest N accounts\n"
             "/check - check all accounts and get ZIP of active ones\n"
             "/clean - remove expired accounts from database\n"
@@ -682,6 +715,35 @@ def register_handlers(bot, cfg):
             bot,
             m.chat.id,
             f"✅ *Fresh Accounts ZIP Delivered!*\n• *Total Fresh Accounts:* `{len(fresh_accs)}`\n• All accounts are packaged with individual `.json` files.",
+            parse_mode="Markdown",
+        )
+
+    @bot.message_handler(commands=["old", "oldzip", "recycled", "used"])
+    def cmd_old(m):
+        if not is_authorized(m.chat.id, cfg, bot, m):
+            return
+        accs = ss.load_accounts()
+        if not accs:
+            safe_reply(bot, m, "No accounts saved in database yet.")
+            return
+
+        old_accs = [ensure_account_fields(a) for a in accs if a.get("is_new_user") is False]
+        if not old_accs:
+            safe_reply(bot, m, "⚠️ No old/recycled accounts found in database (All accounts are fresh!).")
+            return
+
+        safe_reply(bot, m, f"🔍 Packaging {len(old_accs)} old/recycled accounts...")
+        send_batch_zip(
+            m.chat.id,
+            old_accs,
+            bot,
+            batch_title=f"Old / Recycled Accounts ({len(old_accs)} accounts)",
+            zip_name=f"old_accounts_{len(old_accs)}",
+        )
+        safe_send_message(
+            bot,
+            m.chat.id,
+            f"✅ *Old Accounts ZIP Delivered!*\n• *Total Old Accounts:* `{len(old_accs)}`\n• All accounts are packaged with individual `.json` files.",
             parse_mode="Markdown",
         )
 

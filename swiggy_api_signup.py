@@ -537,39 +537,15 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                     status_str = "checker_fallback"
 
                 if registered or status_str == "registered":
-                    slog("🚫 [Already Registered] %s was previously used on Swiggy. Cancelling order %s for refund & renting fresh number..." % (p, o))
+                    slog("🚫 [Already Registered] %s was previously used on Swiggy. Cancelling order %s for 100%% refund & renting fresh number..." % (p, o))
                     ss.cancel_async(provider, o, rent_time=rent_time)
                     continue
-                elif status_str in ["checker_fallback", "error", "timeout", "busy", "unknown"]:
-                    ss.log("[%s] Checker status '%s' -> retrying in 3s..." % (p, status_str))
-                    if ss.cancel_sleep(3):
-                        ss.log("[%s] Cancelled during retry pause." % p)
-                        ss.cancel_async(provider, o, rent_time=rent_time)
-                        return None
-
-                    # Re-check number once more after retry pause
-                    try:
-                        registered2, resp2 = ss.check_swiggy_registered(p, cfg)
-                        status_str2 = str(resp2.get("status", "unknown")).lower().strip()
-                    except Exception:
-                        registered2, status_str2 = False, "error"
-
-                    if registered2 or status_str2 == "registered":
-                        slog("🚫 [Already Registered] %s was previously used on Swiggy. Cancelling order %s for refund & renting fresh number..." % (p, o))
-                        ss.cancel_async(provider, o, rent_time=rent_time)
-                        continue
-                    elif status_str2 == "not_registered":
-                        slog("✨ [100%% Fresh Number Confirmed] %s is brand new!" % p)
-                    else:
-                        slog("🚫 [Unconfirmed Freshness] Could not verify %s. Cancelling order %s for 100%% refund & renting next..." % (p, o))
-                        ss.cancel_async(provider, o, rent_time=rent_time)
-                        continue
-                elif status_str == "not_registered":
-                    slog("✨ [100%% Fresh Number Confirmed] %s is brand new!" % p)
+                elif status_str != "not_registered":
+                    slog("🚫 [Pre-Check Rejected] %s status is '%s' (not confirmed fresh). Cancelling order %s for 100%% refund & renting next..." % (p, status_str, o))
+                    ss.cancel_async(provider, o, rent_time=rent_time)
+                    continue
                 else:
-                    slog("🚫 [Unverified Number] Status for %s is '%s'. Cancelling order %s for refund & renting next..." % (p, status_str, o))
-                    ss.cancel_async(provider, o, rent_time=rent_time)
-                    continue
+                    slog("✨ [100%% Fresh Number Confirmed] %s is brand new!" % p)
 
             if ss.is_cancelled():
                 ss.cancel_async(provider, o, rent_time=rent_time)
@@ -879,15 +855,12 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
                     ss.cancel_async(provider, o, rent_time=rent_time)
                     continue
 
-                only_fresh = (cfg.get("signup") or {}).get("only_fresh", True)
-                if status_str == "not_registered":
-                    slog("✨ [PRE-CHECK PASS] %s is UNREGISTERED (Fresh) -> Queued for Instant OTP!" % p)
-                elif only_fresh and status_str in ["unknown", "error", "busy"]:
-                    slog("🚫 [PRE-CHECK UNVERIFIED] %s status is '%s' -> Cancelling order %s for 100%% refund & renting fresh..." % (p, status_str, o))
+                if status_str != "not_registered":
+                    slog("🚫 [PRE-CHECK REJECT] %s status is '%s' (not confirmed fresh) -> Cancelling order %s for 100%% refund & renting fresh..." % (p, status_str, o))
                     ss.cancel_async(provider, o, rent_time=rent_time)
                     continue
-                else:
-                    slog("⚠️ [PRE-CHECK NOTICE] %s status is '%s' -> Queued for Instant OTP!" % (p, status_str))
+
+                slog("✨ [PRE-CHECK PASS] %s is UNREGISTERED (100%% Fresh) -> Queued for Instant OTP!" % p)
             else:
                 slog("✨ [PRE-CHECK SKIPPED] %s queued for Instant OTP!" % p)
             fresh_queue.put((p, o, rent_time))
