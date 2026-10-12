@@ -569,6 +569,13 @@ def create_accounts(chat_id, count, bot):
         safe_send_message(bot, chat_id, f"⚠️ Error in account creation: {e}", parse_mode=None)
 
     finally:
+        try:
+            active_list = ss.get_active_orders_list()
+            if active_list:
+                log(f"Auto-cancelling {len(active_list)} remaining active orders for full refunds...")
+                ss.cancel_all_active_numbers()
+        except Exception as e:
+            log(f"Cleanup active orders error: {e}")
         drain_end = time.time() + 6.0
         while not log_queue.empty() and time.time() < drain_end:
             time.sleep(0.2)
@@ -1401,13 +1408,20 @@ def register_handlers(bot, cfg):
         active_orders = ss.get_active_orders_list()
         count = len(active_orders)
         if count > 0:
-            safe_reply(
-                bot,
-                m,
-                f"🛑 *Run Cancelled!*\n\n⚠️ You have *{count} active rented number(s)* waiting.\nTap the button below to cancel them all and get refunds immediately.",
-                parse_mode="Markdown",
-                reply_markup=get_control_keyboard(),
-            )
+            safe_reply(bot, m, f"🛑 *Run Cancelled!*\n\n⏳ Auto-cancelling *{count} active rented number(s)* for immediate refund...", parse_mode="Markdown")
+            try:
+                res = ss.cancel_all_active_numbers()
+                refunded = res.get("cancelled", 0)
+                bal = res.get("balance", "N/A")
+                safe_reply(
+                    bot,
+                    m,
+                    f"✅ *Refund Complete!*\n• Cancelled & Refunded: `{refunded}/{count}` orders\n• Live Balance: `{bal}`",
+                    parse_mode="Markdown",
+                    reply_markup=get_control_keyboard(),
+                )
+            except Exception as e:
+                safe_reply(bot, m, f"⚠️ Error cancelling orders: {e}", parse_mode="Markdown", reply_markup=get_control_keyboard())
         else:
             safe_reply(bot, m, "🛑 *Run Cancelled.* No active numbers running in current session.\n\n💡 Tip: To cancel a specific order ID directly, use: `/cancel <order_id>`", parse_mode="Markdown", reply_markup=get_control_keyboard())
 

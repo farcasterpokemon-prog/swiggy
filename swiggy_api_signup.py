@@ -615,16 +615,12 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 tid1 = data.get("tid") or (data.get("data") or {}).get("tid") or tid0
                 sid1 = data.get("sid") or (data.get("data") or {}).get("sid") or sid0
 
-                # Strict Fresh Check: Discard old accounts if only_fresh is enabled
-                only_fresh = (cfg.get("signup") or {}).get("only_fresh", True)
-                if is_registered and only_fresh:
-                    slog("🚫 [OLD ACCOUNT REJECTED] %s is ALREADY REGISTERED on Swiggy (registered=True)! Cancelling & buying a brand new number..." % p)
-                    ss.cancel_async(provider, o, rent_time=rent_time)
-                    continue
-
                 phone, order_id, swuid, tid, sid = p, o, sw, tid1, sid1
                 verify_data = data
-                ss.log("✨ [FRESH NUMBER CONFIRMED] %s is a BRAND NEW user (registered=False)! Finalizing signup..." % p)
+                if is_registered:
+                    slog("ℹ️ [%s] Swiggy verified account (Registered User). Finalizing & saving account to prevent wasting paid OTP..." % p)
+                else:
+                    ss.log("✨ [FRESH NUMBER CONFIRMED] %s is a BRAND NEW user (registered=False)! Finalizing signup..." % p)
                 break
             else:
                 ss.log("⚠️ [%s] Swiggy rejected OTP (HTTP %d status=%s: '%s') -> Cancelling order %s in background & buying next..." % (p, code, status_code, status_msg or str(data)[:100], o))
@@ -785,12 +781,10 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
             tid1 = data.get("tid") or (data.get("data") or {}).get("tid") or tid0
             sid1 = data.get("sid") or (data.get("data") or {}).get("sid") or sid0
 
-            # Strict Fresh Check: Discard old accounts if only_fresh is enabled
-            only_fresh = (cfg.get("signup") or {}).get("only_fresh", True)
-            if is_registered and only_fresh:
-                slog("🚫 [OLD ACCOUNT REJECTED] %s is ALREADY REGISTERED on Swiggy (registered=True)! Cancelling..." % p)
-                ss.cancel_async(provider, o, rent_time=rent_time)
-                return
+            if is_registered:
+                slog("ℹ️ [%s] Swiggy verified account (Registered User). Finalizing & saving account to prevent wasting paid OTP..." % p)
+            else:
+                slog("✨ [FRESH NUMBER CONFIRMED] %s is a BRAND NEW user (registered=False)! Finalizing signup..." % p)
 
             # Mark provider completed
             if hasattr(provider, "set_status"):
@@ -885,8 +879,13 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
                     ss.cancel_async(provider, o, rent_time=rent_time)
                     continue
 
+                only_fresh = (cfg.get("signup") or {}).get("only_fresh", True)
                 if status_str == "not_registered":
                     slog("✨ [PRE-CHECK PASS] %s is UNREGISTERED (Fresh) -> Queued for Instant OTP!" % p)
+                elif only_fresh and status_str in ["unknown", "error", "busy"]:
+                    slog("🚫 [PRE-CHECK UNVERIFIED] %s status is '%s' -> Cancelling order %s for 100%% refund & renting fresh..." % (p, status_str, o))
+                    ss.cancel_async(provider, o, rent_time=rent_time)
+                    continue
                 else:
                     slog("⚠️ [PRE-CHECK NOTICE] %s status is '%s' -> Queued for Instant OTP!" % (p, status_str))
             else:

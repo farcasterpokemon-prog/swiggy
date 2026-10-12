@@ -888,46 +888,33 @@ def detect_user(mobile, session=None):
     payload = {"email": email, "mobile": clean, "name": name}
 
     try:
-        import requests
-        if session is None:
-            session = get_checker_session() or requests.Session()
-
-        response = session.post(
+        req = urllib.request.Request(
             "https://profile.swiggy.com/api/v2/app/signup",
+            data=json.dumps(payload).encode("utf-8"),
             headers=headers,
-            json=payload,
-            timeout=8,
+            method="POST",
         )
-        data = response.json()
+        opener = get_opener()
+        with opener.open(req, timeout=8) as r:
+            raw = r.read()
+            if r.headers.get("Content-Encoding") == "gzip":
+                try:
+                    import gzip
+                    raw = gzip.decompress(raw)
+                except Exception:
+                    pass
+            data = json.loads(raw.decode("utf-8", "replace"))
+
         msg = (data.get("statusMessage") or "").lower()
         code = data.get("statusCode")
 
         if code == 3 or "already exist" in msg or "already registered" in msg:
             return "existing", data
-        if code == 0 or "done successfully" in msg or data.get("tid"):
+        if code == 0 and ("done successfully" in msg or data.get("statusCode") == 0):
             return "new", data
         return "unknown", data
     except Exception as e:
-        # Fallback using urllib
-        try:
-            req = urllib.request.Request(
-                "https://profile.swiggy.com/api/v2/app/signup",
-                data=json.dumps(payload).encode("utf-8"),
-                headers=headers,
-                method="POST",
-            )
-            opener = get_opener()
-            with opener.open(req, timeout=8) as r:
-                data = json.loads(r.read().decode("utf-8", "replace"))
-            msg = (data.get("statusMessage") or "").lower()
-            code = data.get("statusCode")
-            if code == 3 or "already exist" in msg or "already registered" in msg:
-                return "existing", data
-            if code == 0 or "done successfully" in msg or data.get("tid"):
-                return "new", data
-            return "unknown", data
-        except Exception as e2:
-            return "unknown", {"error": str(e2)}
+        return "unknown", {"error": str(e)}
 
 
 def check_swiggy_registered(mobile, cfg=None):
