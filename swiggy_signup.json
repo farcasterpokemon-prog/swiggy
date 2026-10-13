@@ -113,7 +113,7 @@
     }
   },
   "proxy": {
-    "enabled": true,
+    "enabled": false,
     "url": "http://0395a6a73a993fdfc430__cr.in:99b3f6aec7cb0503@gw.dataimpulse.com:823/"
   },
   "ui": {

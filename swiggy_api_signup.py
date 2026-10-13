@@ -119,9 +119,14 @@ def _read(resp):
 def call(method, path, body=None, headers=None, timeout=30, proxy_url=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(BASE + path, data=data, headers=headers or {}, method=method)
-    opener = get_opener(proxy_url)
+    p_url = proxy_url if proxy_url is not None else get_proxy_url()
     try:
-        with opener.open(req, timeout=timeout) as resp:
+        if p_url:
+            opener = get_opener(p_url)
+            cm = opener.open(req, timeout=timeout)
+        else:
+            cm = urllib.request.urlopen(req, timeout=timeout)
+        with cm as resp:
             return resp.status, _read(resp)
     except urllib.error.HTTPError as e:
         return e.code, _read(e)

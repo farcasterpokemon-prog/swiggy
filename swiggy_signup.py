@@ -826,21 +826,11 @@ def generate_random_email(name):
 def get_signup_check_headers(device_id=None):
     dev = str(device_id or uuid.uuid4().hex[:16])
     return {
-        "pl-version": "140",
-        "user-agent": "Swiggy-Android",
-        "content-type": "application/json; charset=utf-8",
-        "version-code": "1807",
-        "app-version": "4.114.2",
-        "latitude": "0.0",
-        "longitude": "0.0",
-        "os-version": "12",
-        "accessibility_enabled": "false",
+        "User-Agent": "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Mobile Safari/537.36",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
         "swuid": dev,
         "deviceid": dev,
-        "x-network-quality": "GOOD",
-        "faw-flags": "1354",
-        "accept-encoding": "gzip",
-        "accept": "application/json; charset=utf-8",
     }
 
 
@@ -894,8 +884,14 @@ def detect_user(mobile, session=None):
             headers=headers,
             method="POST",
         )
-        opener = get_opener()
-        with opener.open(req, timeout=8) as r:
+        proxy_url = get_proxy_url()
+        if proxy_url:
+            opener = get_opener(proxy_url)
+            cm = opener.open(req, timeout=8)
+        else:
+            cm = urllib.request.urlopen(req, timeout=8)
+
+        with cm as r:
             raw = r.read()
             if r.headers.get("Content-Encoding") == "gzip":
                 try:
