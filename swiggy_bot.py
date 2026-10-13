@@ -448,8 +448,11 @@ def create_accounts(chat_id, count, bot):
 
     is_bal_zero = False
     try:
-        val = float(re.sub(r"[^\d.]", "", bal_str) or 0)
-        if val < 0.08 or any(err in bal_str.lower() for err in ["bad_key", "error", "invalid", "no_key", "no_numbers", "access_balance:0"]):
+        raw_bal_num = bal_str
+        if "ACCESS_BALANCE:" in raw_bal_num.upper():
+            raw_bal_num = raw_bal_num.upper().split("ACCESS_BALANCE:")[1].strip()
+        val = float(re.sub(r"[^\d.]", "", raw_bal_num) or 0)
+        if val < 0.05 or any(err in bal_str.lower() for err in ["bad_key", "error", "invalid", "no_key", "no_numbers", "zero_balance"]):
             is_bal_zero = True
     except Exception:
         is_bal_zero = True
@@ -491,11 +494,14 @@ def create_accounts(chat_id, count, bot):
             bal_retry = ss.get_provider_balance(op)
             bal_retry_str = str(bal_retry).strip()
             try:
-                rval = float(re.sub(r"[^\d.]", "", bal_retry_str) or 0)
+                raw_retry_num = bal_retry_str
+                if "ACCESS_BALANCE:" in raw_retry_num.upper():
+                    raw_retry_num = raw_retry_num.upper().split("ACCESS_BALANCE:")[1].strip()
+                rval = float(re.sub(r"[^\d.]", "", raw_retry_num) or 0)
             except Exception:
                 rval = 0
 
-            if rval >= 0.08 and not any(err in bal_retry_str.lower() for err in ["bad_key", "error", "invalid", "no_key"]):
+            if rval >= 0.05 and not any(err in bal_retry_str.lower() for err in ["bad_key", "error", "invalid", "no_key"]):
                 safe_send_message(
                     bot,
                     chat_id,

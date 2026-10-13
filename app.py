@@ -92,17 +92,24 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 def setup_webhook():
     """Sets or verifies the Telegram Webhook with automatic retries."""
+    desired_updates = ["message", "edited_message", "channel_post", "edited_channel_post", "callback_query"]
     for attempt in range(1, 10):
         try:
             current_info = bot.get_webhook_info()
-            if current_info.url != WEBHOOK_URL:
-                logger.info(f"Setting Telegram Webhook to: {WEBHOOK_URL}")
+            allowed = current_info.allowed_updates or []
+            if current_info.url != WEBHOOK_URL or "callback_query" not in allowed:
+                logger.info(f"Setting Telegram Webhook to: {WEBHOOK_URL} with callback_query support")
                 try:
                     bot.remove_webhook()
                 except Exception:
                     pass
                 time.sleep(1)
-                success = bot.set_webhook(url=WEBHOOK_URL, max_connections=40, drop_pending_updates=False)
+                success = bot.set_webhook(
+                    url=WEBHOOK_URL,
+                    max_connections=40,
+                    drop_pending_updates=False,
+                    allowed_updates=desired_updates,
+                )
                 if success:
                     logger.info(f"Telegram Webhook successfully set to {WEBHOOK_URL}")
                     return True
@@ -118,6 +125,7 @@ def setup_webhook():
 def keep_alive_worker():
     """Pings the public web service and enforces Telegram webhook continuously."""
     time.sleep(10)
+    desired_updates = ["message", "edited_message", "channel_post", "edited_channel_post", "callback_query"]
     while True:
         try:
             req = urllib.request.Request(
@@ -132,14 +140,20 @@ def keep_alive_worker():
         # Webhook Auto-Heal: Check and enforce Telegram webhook on every keepalive cycle
         try:
             current_info = bot.get_webhook_info()
-            if current_info.url != WEBHOOK_URL:
-                logger.warning(f"Webhook URL deviated to '{current_info.url}'. Auto-restoring to {WEBHOOK_URL}...")
+            allowed = current_info.allowed_updates or []
+            if current_info.url != WEBHOOK_URL or "callback_query" not in allowed:
+                logger.warning(f"Webhook URL or allowed_updates deviated. Auto-restoring to {WEBHOOK_URL}...")
                 try:
                     bot.remove_webhook()
                 except Exception:
                     pass
                 time.sleep(0.5)
-                success = bot.set_webhook(url=WEBHOOK_URL, max_connections=40, drop_pending_updates=False)
+                success = bot.set_webhook(
+                    url=WEBHOOK_URL,
+                    max_connections=40,
+                    drop_pending_updates=False,
+                    allowed_updates=desired_updates,
+                )
                 if success:
                     logger.info(f"Telegram Webhook successfully restored to {WEBHOOK_URL}")
         except Exception as e:

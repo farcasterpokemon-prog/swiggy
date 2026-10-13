@@ -718,12 +718,13 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
 
     cfg_workers = cfg.get("workers") or op.get("workers") or 50
     total_workers = min(max(int(cfg_workers), 10), 100)
-    hunter_concurrency = min(total_workers, 30)
+    hunter_concurrency = min(total_workers, max(count * 2, 3), 15)
 
     stop_event = threading.Event()
     fresh_queue = queue.Queue(maxsize=100)
     active_orders = {}
     active_lock = threading.Lock()
+    hunting_state = {"in_progress": 0}
     created_accounts = []
     created_lock = threading.Lock()
 
@@ -829,10 +830,12 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
                 with created_lock:
                     fresh_count = sum(1 for a in created_accounts if a.get("is_new_user", True))
                 needed = max(1, count - fresh_count)
-                in_flight = len(active_orders) + fresh_queue.qsize()
-                if in_flight >= min(max(needed * 2, 5), hunter_concurrency):
+                target_max = min(max(needed * 2, 2), hunter_concurrency)
+                in_flight = len(active_orders) + fresh_queue.qsize() + hunting_state["in_progress"]
+                if in_flight >= target_max:
                     time.sleep(0.3)
                     continue
+                hunting_state["in_progress"] += 1
 
             try:
                 p, o = provider.get_number()
@@ -846,6 +849,9 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
                 elif ss.cancel_sleep(1.5):
                     break
                 continue
+            finally:
+                with active_lock:
+                    hunting_state["in_progress"] = max(0, hunting_state["in_progress"] - 1)
 
             p = str(p).strip()
             slog("rented %s (order %s) [hunting]" % (p, o))
