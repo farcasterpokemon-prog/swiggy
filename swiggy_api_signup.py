@@ -484,13 +484,19 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 err_str = str(e)
                 is_no_balance = any(k in err_str.upper() for k in ["NO_BALANCE", "INSUFFICIENT", "NOT ENOUGH", "NO_MONEY", "LOW_BALANCE", "ZERO_BALANCE"])
                 if is_no_balance:
+                    active_count = len(ss.load_active_orders())
+                    if active_count > 0:
+                        ss.log("Balance temporarily reserved by in-flight orders; retrying in 2s...")
+                        if ss.cancel_sleep(2.0):
+                            return None
+                        continue
                     global INSUFFICIENT_PAUSE_UNTIL
                     with INSUFFICIENT_FUNDS_LOCK:
                         now = time.time()
-                        # Only broadcast the message once per 60 seconds (zero spam!)
+                        # Only broadcast the message once per 15 seconds
                         if now >= INSUFFICIENT_PAUSE_UNTIL:
-                            INSUFFICIENT_PAUSE_UNTIL = now + 60.0
-                            slog("⏳ [Insufficient Funds] Provider balance is empty or insufficient. Pausing for 1 minute before retrying... (Please recharge or use /setkey)")
+                            INSUFFICIENT_PAUSE_UNTIL = now + 15.0
+                            slog("⏳ [Insufficient Funds] Provider balance is empty or insufficient. Pausing for 15s before retrying... (Please recharge or use /setkey)")
                         pause_sec = max(1.0, INSUFFICIENT_PAUSE_UNTIL - time.time())
 
                     ss.log("Worker pausing %ds due to insufficient provider balance..." % int(pause_sec))
@@ -731,7 +737,8 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
             stop_event.set()
             return True
         with created_lock:
-            if len(created_accounts) >= count:
+            fresh_count = sum(1 for a in created_accounts if a.get("is_new_user", True))
+            if fresh_count >= count or len(created_accounts) >= count + 10:
                 stop_event.set()
                 return True
         return False
@@ -785,6 +792,7 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
 
             acct = extract_account_dict(final_data, p, tid1, sid1, sw, name=name)
             acct["is_new_user"] = not is_registered
+            acct["account_type"] = "OLD" if is_registered else "FRESH"
             if not acct.get("token"):
                 acct["token"] = (final_data.get("data") or {}).get("token") or (data.get("data") or {}).get("token") or f"jwt_swiggy_{int(time.time())}_{uuid.uuid4().hex[:12]}"
             if not acct.get("customerId"):
@@ -798,29 +806,31 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
                 slog("live verify notice: %s" % e)
 
             ss.save_account(acct)
-            slog("🎉 SUCCESS: Account Created & Verified: %s (customerId: %s)" % (acct["mobile"], acct["customerId"]))
+            slog("🎉 SUCCESS: Account Created & Verified [%s]: %s (customerId: %s)" % (acct.get("account_type", "FRESH"), acct["mobile"], acct["customerId"]))
 
             with created_lock:
                 created_accounts.append(acct)
-                cur_len = len(created_accounts)
-                if cur_len >= count:
+                fresh_count = sum(1 for a in created_accounts if a.get("is_new_user", True))
+                if fresh_count >= count or len(created_accounts) >= count + 10:
                     stop_event.set()
                 if on_account_created:
                     try:
-                        on_account_created(acct, cur_len, count)
+                        on_account_created(acct, len(created_accounts), count)
                     except Exception as e:
                         slog("callback error: %s" % e)
         else:
             slog("⚠️ [%s] Swiggy rejected OTP (HTTP %d status=%s: '%s') -> Cancelling order in background..." % (p, code, status_code, status_msg or str(data)[:100]))
-            ss.cancel_async(provider, o, rent_time=rent_time)
             ss.cancel_async(provider, o, rent_time=rent_time)
 
     # 1. Hunter Worker (Stage 1)
     def hunter_worker():
         while not is_stopped():
             with active_lock:
-                in_flight = len(active_orders) + fresh_queue.qsize() + len(created_accounts)
-                if in_flight >= count + min(count * 2, 20):
+                with created_lock:
+                    fresh_count = sum(1 for a in created_accounts if a.get("is_new_user", True))
+                needed = max(1, count - fresh_count)
+                in_flight = len(active_orders) + fresh_queue.qsize()
+                if in_flight >= min(max(needed * 2, 5), hunter_concurrency):
                     time.sleep(0.3)
                     continue
 
@@ -829,7 +839,11 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
                 rent_time = time.time()
                 ss.register_active_order(o, p, provider_type, rent_time)
             except Exception as e:
-                if ss.cancel_sleep(2):
+                err_str = str(e)
+                if "NO_BALANCE" in err_str.upper() or "INSUFFICIENT" in err_str.upper():
+                    if ss.cancel_sleep(2.0):
+                        break
+                elif ss.cancel_sleep(1.5):
                     break
                 continue
 

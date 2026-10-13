@@ -205,7 +205,7 @@ def find_account_by_query(query, accounts):
 
 
 def ensure_account_fields(acct):
-    """Ensures customerId, name, userName, phoneNumber, and valid live session are present."""
+    """Ensures customerId, name, userName, phoneNumber, is_new_user, and valid live session are present."""
     if not acct:
         return acct
 
@@ -223,7 +223,12 @@ def ensure_account_fields(acct):
     acct["mobile"] = mob
     acct["phoneNumber"] = mob
 
-    # 3. Ensure customerId is populated
+    # 3. Ensure is_new_user and account_type are populated
+    if "is_new_user" not in acct:
+        acct["is_new_user"] = True
+    acct["account_type"] = "FRESH" if acct.get("is_new_user", True) else "OLD"
+
+    # 4. Ensure customerId is populated
     if not acct.get("customerId") or str(acct.get("customerId")) in ["", "?", "None", "0"]:
         acct["customerId"] = api.extract_customer_id_from_any(acct) or api.fetch_profile_customer_id(
             acct.get("tid", ""), acct.get("sid", ""), acct.get("deviceId", "")
@@ -233,16 +238,15 @@ def ensure_account_fields(acct):
 
 
 def send_account_json(chat_id, acct, bot):
-    """Sends individual account JSON both as clean chat text and as a downloadable document."""
+    """Sends individual account JSON both as clean chat text and as a downloadable document with clear FRESH/OLD tag."""
     if not acct or not bot:
         return False
     try:
         mobile = str(acct.get("mobile") or acct.get("phoneNumber") or "account")
         clean_mob = re.sub(r"[^0-9A-Za-z_-]", "_", mobile)
         json_str = json.dumps(acct, indent=2, ensure_ascii=False)
-        filename = f"account_{clean_mob}.json"
 
-        # 1. Send readable text formatted JSON block directly into chat (plain text so zero markdown parsing errors)
+        # 1. Send readable text formatted JSON block directly into chat with clear FRESH/OLD badge
         name = acct.get("userName") or acct.get("name") or "Swiggy User"
         cid = acct.get("customerId") or "?"
         token = acct.get("token") or "?"
@@ -250,8 +254,14 @@ def send_account_json(chat_id, acct, bot):
         sid = acct.get("sid") or ""
         dev_id = acct.get("deviceId") or ""
 
+        is_fresh = bool(acct.get("is_new_user", True))
+        status_tag = "✨ FRESH (Brand New User)" if is_fresh else "♻️ OLD (Recycled User)"
+        type_str = "FRESH" if is_fresh else "OLD"
+        filename = f"account_{type_str}_{clean_mob}.json"
+
         msg_header = (
-            f"🎉 Account Created & Verified!\n\n"
+            f"🎉 Account Created & Verified! [{status_tag}]\n\n"
+            f"🏷️ Type: {status_tag}\n"
             f"📱 Mobile: +91 {mobile}\n"
             f"👤 Name: {name}\n"
             f"🆔 Customer ID: {cid}\n"
@@ -274,7 +284,7 @@ def send_account_json(chat_id, acct, bot):
                     chat_id,
                     bio,
                     visible_file_name=filename,
-                    caption=f"📄 account_{clean_mob}.json",
+                    caption=f"📄 [{type_str}] account_{clean_mob}.json ({status_tag})",
                 )
                 log(f"Sent JSON file for {mobile} to {chat_id}")
                 return True
@@ -301,7 +311,9 @@ def send_account_json(chat_id, acct, bot):
 
 def send_batch_zip(chat_id, accounts_list, bot, batch_title="10-Pack", zip_name=None):
     """Packages a list of accounts into an in-memory .zip and sends to Telegram."""
-    if not accounts_list or not bot:
+    if accounts_list is None:
+        accounts_list = []
+    if not bot:
         return False
 
     cleaned_list = [ensure_account_fields(dict(a)) for a in accounts_list]
@@ -315,6 +327,11 @@ def send_batch_zip(chat_id, accounts_list, bot, batch_title="10-Pack", zip_name=
         zip_buf = io.BytesIO()
         with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("accounts_summary.json", json.dumps(cleaned_list, indent=2))
+            if not cleaned_list:
+                zf.writestr(
+                    "readme.txt",
+                    f"Category: {batch_title}\nTotal accounts in this category: 0\nAll accounts created in this run were fresh."
+                )
             for i, acct in enumerate(cleaned_list):
                 mob = str(acct.get("mobile") or acct.get("phoneNumber") or f"account_{i+1}")
                 clean_mob = re.sub(r"[^0-9A-Za-z_-]", "_", mob)
@@ -498,88 +515,60 @@ def create_accounts(chat_id, count, bot):
                 return
 
     try:
-        workers = min(count, 100)
+        cfg_workers = cfg.get("workers") or (op.get("workers") if isinstance(op, dict) else 50) or 50
         safe_send_message(
             bot,
             chat_id,
-            f"🚀 Starting creation of {count} account(s) via {op.get('type', 'OTP').upper()}...",
-            parse_mode=None,
+            f"🚀 *Starting Parallel Creation of {count} Account(s)* via {op.get('type', 'OTP').upper()}...\n"
+            f"⚡ Parallel Hunting & Dispatching Active (Concurrency: `{cfg_workers}` workers)!",
+            parse_mode="Markdown",
         )
 
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = set(ex.submit(api.create_api_account, cfg) for _ in range(workers))
-            while futs and not (ss.is_cancelled() or RUNNING["cancel"]):
-                fresh_count = sum(1 for a in newly_created_accounts if a.get("is_new_user", True))
-                if fresh_count >= count or len(newly_created_accounts) >= count + 10:
-                    break
+        def on_account(acct, done_count, total_count):
+            nonlocal created
+            acct = ensure_account_fields(acct)
+            created += 1
+            newly_created_accounts.append(acct)
+            RUNNING["done"] = created
+            send_account_json(chat_id, acct, bot)
 
-                done, futs = concurrent.futures.wait(futs, return_when=concurrent.futures.FIRST_COMPLETED)
-                for f in done:
-                    if ss.is_cancelled() or RUNNING["cancel"]:
-                        break
-                    try:
-                        acct = f.result()
-                    except Exception as e:
-                        log("Parallel account creation error: %s" % e)
-                        acct = None
+        # Run multi-threaded parallel engine
+        results = api.create_pipeline_batch(
+            count,
+            cfg,
+            on_account_created=on_account,
+            is_cancelled=lambda: ss.is_cancelled() or RUNNING.get("cancel", False),
+        )
 
-                    if acct:
-                        acct = ensure_account_fields(acct)
-                        created += 1
-                        newly_created_accounts.append(acct)
+        # Ensure any returned account not yet sent is delivered
+        for a in (results or []):
+            if not any(x.get("mobile") == a.get("mobile") for x in newly_created_accounts):
+                a = ensure_account_fields(a)
+                created += 1
+                newly_created_accounts.append(a)
+                send_account_json(chat_id, a, bot)
 
-                        # Send verified account JSON directly to chat
-                        send_account_json(chat_id, acct, bot)
-
-                    # If this worker finished but we still need more fresh accounts, spawn replacement worker
-                    fresh_in_progress = sum(1 for a in newly_created_accounts if a.get("is_new_user", True))
-                    if fresh_in_progress + len(futs) < count and not (ss.is_cancelled() or RUNNING["cancel"]):
-                        if getattr(api, "INSUFFICIENT_PAUSE_UNTIL", 0) > time.time():
-                            time.sleep(1.0)
-                        else:
-                            futs.add(ex.submit(api.create_api_account, cfg))
-
-            # CAPTURE & DELIVER ALL REMAINING IN-FLIGHT ACCOUNTS (Zero accounts dropped!)
-            if futs and not (ss.is_cancelled() or RUNNING["cancel"]):
-                done_extra, remaining_pending = concurrent.futures.wait(futs, timeout=30)
-                for f in done_extra:
-                    try:
-                        acct = f.result()
-                    except Exception as e:
-                        log("In-flight extra account note: %s" % e)
-                        acct = None
-
-                    if acct:
-                        acct = ensure_account_fields(acct)
-                        created += 1
-                        newly_created_accounts.append(acct)
-
-                        # Send extra verified account JSON directly to chat
-                        send_account_json(chat_id, acct, bot)
-
-        RUNNING["done"] = created
+        RUNNING["done"] = len(newly_created_accounts)
         fresh_accs = [a for a in newly_created_accounts if a.get("is_new_user", True)]
         old_accs = [a for a in newly_created_accounts if not a.get("is_new_user", True)]
 
-        # 1. Deliver Fresh Accounts ZIP
-        if fresh_accs:
-            send_batch_zip(
-                chat_id,
-                fresh_accs,
-                bot,
-                batch_title=f"✨ Fresh Accounts ({len(fresh_accs)} accounts)",
-                zip_name=f"fresh_new_accounts_{len(fresh_accs)}",
-            )
+        # 1. ALWAYS Deliver Fresh Accounts ZIP
+        send_batch_zip(
+            chat_id,
+            fresh_accs,
+            bot,
+            batch_title=f"✨ Fresh Accounts ({len(fresh_accs)} accounts)",
+            zip_name=f"fresh_new_accounts_{len(fresh_accs)}",
+        )
 
-        # 2. Deliver Old / Recycled Accounts ZIP
-        if old_accs:
-            send_batch_zip(
-                chat_id,
-                old_accs,
-                bot,
-                batch_title=f"♻️ Old Accounts ({len(old_accs)} accounts)",
-                zip_name=f"old_accounts_{len(old_accs)}",
-            )
+        # 2. ALWAYS Deliver Old Accounts ZIP
+        send_batch_zip(
+            chat_id,
+            old_accs,
+            bot,
+            batch_title=f"♻️ Old Accounts ({len(old_accs)} accounts)",
+            zip_name=f"old_accounts_{len(old_accs)}",
+        )
 
         # 3. Final summary message
         summary_msg = (
@@ -587,13 +576,10 @@ def create_accounts(chat_id, count, bot):
             f"• *Total Delivered:* `{len(newly_created_accounts)}`\n"
             f"• ✨ *Fresh Accounts:* `{len(fresh_accs)}`\n"
             f"• ♻️ *Old Accounts:* `{len(old_accs)}`\n\n"
+            f"📦 *Delivered 2 separate ZIP archives above:*\n"
+            f"1️⃣ `fresh_new_accounts_{len(fresh_accs)}.zip`\n"
+            f"2️⃣ `old_accounts_{len(old_accs)}.zip`"
         )
-        if fresh_accs and old_accs:
-            summary_msg += "📦 *Delivered 2 separate ZIP archives above:*\n1️⃣ `Fresh Accounts ZIP`\n2️⃣ `Old Accounts ZIP`"
-        elif fresh_accs:
-            summary_msg += "📦 *Delivered `Fresh Accounts ZIP` above* (100% fresh numbers!)."
-        elif old_accs:
-            summary_msg += "📦 *Delivered `Old Accounts ZIP` above*."
         safe_send_message(bot, chat_id, summary_msg, parse_mode="Markdown")
 
     except Exception as e:
