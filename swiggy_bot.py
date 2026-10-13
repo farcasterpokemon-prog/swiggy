@@ -521,40 +521,66 @@ def create_accounts(chat_id, count, bot):
                 return
 
     try:
-        cfg_workers = cfg.get("workers") or (op.get("workers") if isinstance(op, dict) else 50) or 50
+        workers = min(count, 100)
         safe_send_message(
             bot,
             chat_id,
-            f"🚀 *Starting Parallel Creation of {count} Account(s)* via {op.get('type', 'OTP').upper()}...\n"
-            f"⚡ Parallel Hunting & Dispatching Active (Concurrency: `{cfg_workers}` workers)!",
-            parse_mode="Markdown",
+            f"🚀 Starting creation of {count} account(s) via {op.get('type', 'OTP').upper()}...",
+            parse_mode=None,
         )
 
-        def on_account(acct, done_count, total_count):
-            nonlocal created
-            acct = ensure_account_fields(acct)
-            created += 1
-            newly_created_accounts.append(acct)
-            RUNNING["done"] = created
-            send_account_json(chat_id, acct, bot)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = set(ex.submit(api.create_api_account, cfg) for _ in range(workers))
+            while futs and not (ss.is_cancelled() or RUNNING["cancel"]):
+                fresh_count = sum(1 for a in newly_created_accounts if a.get("is_new_user", True))
+                if fresh_count >= count or len(newly_created_accounts) >= count + 10:
+                    break
 
-        # Run multi-threaded parallel engine
-        results = api.create_pipeline_batch(
-            count,
-            cfg,
-            on_account_created=on_account,
-            is_cancelled=lambda: ss.is_cancelled() or RUNNING.get("cancel", False),
-        )
+                done, futs = concurrent.futures.wait(futs, return_when=concurrent.futures.FIRST_COMPLETED)
+                for f in done:
+                    if ss.is_cancelled() or RUNNING["cancel"]:
+                        break
+                    try:
+                        acct = f.result()
+                    except Exception as e:
+                        log("Parallel account creation error: %s" % e)
+                        acct = None
 
-        # Ensure any returned account not yet sent is delivered
-        for a in (results or []):
-            if not any(x.get("mobile") == a.get("mobile") for x in newly_created_accounts):
-                a = ensure_account_fields(a)
-                created += 1
-                newly_created_accounts.append(a)
-                send_account_json(chat_id, a, bot)
+                    if acct:
+                        acct = ensure_account_fields(acct)
+                        created += 1
+                        newly_created_accounts.append(acct)
 
-        RUNNING["done"] = len(newly_created_accounts)
+                        # Send verified account JSON directly to chat
+                        send_account_json(chat_id, acct, bot)
+
+                    # If this worker finished but we still need more fresh accounts, spawn replacement worker
+                    fresh_in_progress = sum(1 for a in newly_created_accounts if a.get("is_new_user", True))
+                    if fresh_in_progress + len(futs) < count and not (ss.is_cancelled() or RUNNING["cancel"]):
+                        if getattr(api, "INSUFFICIENT_PAUSE_UNTIL", 0) > time.time():
+                            time.sleep(1.0)
+                        else:
+                            futs.add(ex.submit(api.create_api_account, cfg))
+
+            # CAPTURE & DELIVER ALL REMAINING IN-FLIGHT ACCOUNTS (Zero accounts dropped!)
+            if futs and not (ss.is_cancelled() or RUNNING["cancel"]):
+                done_extra, remaining_pending = concurrent.futures.wait(futs, timeout=30)
+                for f in done_extra:
+                    try:
+                        acct = f.result()
+                    except Exception as e:
+                        log("In-flight extra account note: %s" % e)
+                        acct = None
+
+                    if acct:
+                        acct = ensure_account_fields(acct)
+                        created += 1
+                        newly_created_accounts.append(acct)
+
+                        # Send extra verified account JSON directly to chat
+                        send_account_json(chat_id, acct, bot)
+
+        RUNNING["done"] = created
         fresh_accs = [a for a in newly_created_accounts if a.get("is_new_user", True)]
         old_accs = [a for a in newly_created_accounts if not a.get("is_new_user", True)]
 
