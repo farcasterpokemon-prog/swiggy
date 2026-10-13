@@ -913,12 +913,33 @@ def detect_user(mobile, session=None):
         return "unknown", {"error": str(e)}
 
 
+def check_external_api(clean):
+    try:
+        url = "https://checker.otpcart.xyz/api/check-swiggy"
+        req = urllib.request.Request(
+            url,
+            data=json.dumps({"mobile": clean, "phone": clean}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+            st = str(data.get("status", "")).lower()
+            if st == "registered":
+                return True, {"status": "registered", "mobile": clean, "raw": data}
+            elif st == "not_registered":
+                return False, {"status": "not_registered", "mobile": clean, "raw": data}
+    except Exception:
+        pass
+    return None
+
+
 def check_swiggy_registered(mobile, cfg=None):
     """
-    Native Swiggy Registration Checker.
+    Dual-Engine Swiggy Registration Checker (Native Swiggy API + External Fallback).
     Returns: (is_registered, response_dict)
-    - If user exists ('existing') → (True, {'status': 'registered', 'mobile': clean})
-    - If user is brand new ('new') → (False, {'status': 'not_registered', 'mobile': clean})
+    - If user exists ('existing' / 'registered') → (True, {'status': 'registered', 'mobile': clean})
+    - If user is brand new ('new' / 'not_registered') → (False, {'status': 'not_registered', 'mobile': clean})
     - If unknown/error ('unknown') → (False, {'status': 'unknown', 'mobile': clean})
     """
     clean = re.sub(r"\D", "", str(mobile).strip())
@@ -935,6 +956,10 @@ def check_swiggy_registered(mobile, cfg=None):
     elif status == "new":
         return False, {"status": "not_registered", "mobile": clean, "raw": data}
     else:
+        # Fail-safe fallback to secondary checker
+        ext_res = check_external_api(clean)
+        if ext_res is not None:
+            return ext_res
         return False, {"status": "unknown", "mobile": clean, "raw": data}
 
 
