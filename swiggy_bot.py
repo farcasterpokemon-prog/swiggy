@@ -521,19 +521,18 @@ def create_accounts(chat_id, count, bot):
                 return
 
     try:
-        workers = min(count, 100)
+        max_workers = min(count, 8)
         safe_send_message(
             bot,
             chat_id,
-            f"🚀 Starting creation of {count} account(s) via {op.get('type', 'OTP').upper()}...",
+            f"🚀 Starting creation of {count} account(s) via {op.get('type', 'OTP').upper()} (concurrency: {max_workers})...",
             parse_mode=None,
         )
 
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = set(ex.submit(api.create_api_account, cfg) for _ in range(workers))
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futs = set(ex.submit(api.create_api_account, cfg) for _ in range(max_workers))
             while futs and not (ss.is_cancelled() or RUNNING["cancel"]):
-                fresh_count = sum(1 for a in newly_created_accounts if a.get("is_new_user", True))
-                if fresh_count >= count or len(newly_created_accounts) >= count + 10:
+                if len(newly_created_accounts) >= count:
                     break
 
                 done, futs = concurrent.futures.wait(futs, return_when=concurrent.futures.FIRST_COMPLETED)
@@ -554,31 +553,17 @@ def create_accounts(chat_id, count, bot):
                         # Send verified account JSON directly to chat
                         send_account_json(chat_id, acct, bot)
 
-                    # If this worker finished but we still need more fresh accounts, spawn replacement worker
-                    fresh_in_progress = sum(1 for a in newly_created_accounts if a.get("is_new_user", True))
-                    if fresh_in_progress + len(futs) < count and not (ss.is_cancelled() or RUNNING["cancel"]):
+                    # Dynamic refill: only spawn if remaining needed accounts > len(futs)
+                    if (len(newly_created_accounts) + len(futs) < count) and not (ss.is_cancelled() or RUNNING["cancel"]):
                         if getattr(api, "INSUFFICIENT_PAUSE_UNTIL", 0) > time.time():
                             time.sleep(1.0)
                         else:
                             futs.add(ex.submit(api.create_api_account, cfg))
 
-            # CAPTURE & DELIVER ALL REMAINING IN-FLIGHT ACCOUNTS (Zero accounts dropped!)
-            if futs and not (ss.is_cancelled() or RUNNING["cancel"]):
-                done_extra, remaining_pending = concurrent.futures.wait(futs, timeout=30)
-                for f in done_extra:
-                    try:
-                        acct = f.result()
-                    except Exception as e:
-                        log("In-flight extra account note: %s" % e)
-                        acct = None
-
-                    if acct:
-                        acct = ensure_account_fields(acct)
-                        created += 1
-                        newly_created_accounts.append(acct)
-
-                        # Send extra verified account JSON directly to chat
-                        send_account_json(chat_id, acct, bot)
+            # TARGET REACHED: Cancel remaining in-flight workers immediately so they do not request paid OTPs
+            ss.trigger_cancel()
+            for f in futs:
+                f.cancel()
 
         RUNNING["done"] = created
         fresh_accs = [a for a in newly_created_accounts if a.get("is_new_user", True)]
@@ -633,6 +618,7 @@ def create_accounts(chat_id, count, bot):
         time.sleep(0.5)
         api.LOG_HOOK = None
         ss.LOG_HOOK = None
+        ss.reset_cancel()
         RUNNING["active"] = False
     return created
 
