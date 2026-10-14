@@ -42,12 +42,27 @@ CTX.verify_mode = ssl.CERT_NONE
 UNVERIFIED_CTX = CTX
 
 
-def get_proxy_url():
+def get_proxy_url(cfg=None):
     try:
-        cfg = load_config(CONFIG_PATH)
+        if cfg is None:
+            cfg = load_config(CONFIG_PATH)
         p_cfg = cfg.get("proxy") or {}
         if p_cfg.get("enabled") and p_cfg.get("url"):
-            return p_cfg.get("url").strip()
+            url = p_cfg.get("url").strip()
+            if "dataimpulse.com" in url and "__cr." not in url:
+                try:
+                    parts = urllib.parse.urlsplit(url)
+                    if parts.netloc and "@" in parts.netloc:
+                        user_pass, host_port = parts.netloc.split("@", 1)
+                        if ":" in user_pass:
+                            u, p = user_pass.split(":", 1)
+                            if "__cr." not in u:
+                                u = f"{u}__cr.in"
+                            new_netloc = f"{u}:{p}@{host_port}"
+                            url = urllib.parse.urlunsplit((parts.scheme, new_netloc, parts.path, parts.query, parts.fragment))
+                except Exception:
+                    pass
+            return url
     except Exception:
         pass
     return None
@@ -859,16 +874,11 @@ def get_checker_session():
     return CHECKER_SESSION
 
 
-PROXY_WAF_COOLDOWN_UNTIL = 0.0
-PROXY_WAF_COOLDOWN_LOCK = threading.Lock()
-
-
 def detect_user(mobile, session=None):
     """
     Check if a Swiggy mobile number is new or existing directly via Swiggy API.
-    Uses official Swiggy-Android headers with automatic direct fallback if proxy is blocked.
+    Uses official Swiggy-Android headers with Indian residential proxy and auto-fallback.
     """
-    global PROXY_WAF_COOLDOWN_UNTIL
     clean = re.sub(r"\D", "", str(mobile).strip())
     if len(clean) > 10 and clean.startswith("91"):
         clean = clean[2:]
@@ -886,33 +896,25 @@ def detect_user(mobile, session=None):
     data_bytes = json.dumps(payload).encode("utf-8")
     url = "https://profile.swiggy.com/api/v2/app/signup"
 
+    proxy_url = get_proxy_url()
+
     def _execute(use_proxy):
         req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
-        if use_proxy:
-            proxy_url = get_proxy_url()
-            if proxy_url:
-                opener = get_opener(proxy_url)
-                return opener.open(req, timeout=2.5)
-        return urllib.request.urlopen(req, timeout=3.5)
+        if use_proxy and proxy_url:
+            opener = get_opener(proxy_url)
+            return opener.open(req, timeout=8.0)
+        return urllib.request.urlopen(req, timeout=6.0)
 
     try:
-        proxy_url = get_proxy_url()
         cm = None
-        now = time.time()
-        if proxy_url and now >= PROXY_WAF_COOLDOWN_UNTIL:
+        if proxy_url:
             try:
                 cm = _execute(use_proxy=True)
-            except urllib.error.HTTPError as he:
-                if he.code in (403, 429, 502, 503, 504):
-                    with PROXY_WAF_COOLDOWN_LOCK:
-                        PROXY_WAF_COOLDOWN_UNTIL = time.time() + 60.0
+            except Exception as e:
+                try:
                     cm = _execute(use_proxy=False)
-                else:
-                    return "unknown", {"error": f"HTTP {he.code}"}
-            except Exception:
-                with PROXY_WAF_COOLDOWN_LOCK:
-                    PROXY_WAF_COOLDOWN_UNTIL = time.time() + 30.0
-                cm = _execute(use_proxy=False)
+                except Exception:
+                    return "unknown", {"error": str(e)}
         else:
             cm = _execute(use_proxy=False)
 
@@ -951,10 +953,6 @@ def detect_user(mobile, session=None):
         return "unknown", {"error": str(e)}
 
 
-NATIVE_COOLDOWN_UNTIL = 0.0
-NATIVE_COOLDOWN_LOCK = threading.Lock()
-
-
 def check_external_api(clean, timeout=6, retries=1):
     url = "https://checker.otpcart.xyz/api/check-swiggy"
     payload = json.dumps({"mobile": clean, "phone": clean}).encode("utf-8")
@@ -980,8 +978,9 @@ def check_external_api(clean, timeout=6, retries=1):
 def check_swiggy_registered(mobile, cfg=None):
     """
     High-Speed Dual-Engine Swiggy Registration Checker.
-    1. Runs Native Swiggy with official app signatures & instant direct fallback (0.3s).
-    2. If Native Swiggy was inconclusive, queries Otpcart backup checker.
+    1. Primary: Native Swiggy with official app signatures & Indian residential proxy (0.5s - 2s).
+    2. Secondary: Otpcart backup rotating checker.
+    3. Final retry: If indeterminate, re-probes once to guarantee strict fresh verification.
     """
     clean = re.sub(r"\D", "", str(mobile).strip())
     if len(clean) > 10 and clean.startswith("91"):
@@ -991,17 +990,25 @@ def check_swiggy_registered(mobile, cfg=None):
     elif len(clean) > 10:
         clean = clean[-10:]
 
-    # Primary check: Native Swiggy with automatic fallback
+    # Engine 1: Native Swiggy via Indian residential proxy
     status, data = detect_user(clean)
     if status == "existing":
         return True, {"status": "registered", "mobile": clean, "raw": data}
     elif status == "new":
         return False, {"status": "not_registered", "mobile": clean, "raw": data}
 
-    # Backup check: Otpcart rotating proxy
+    # Engine 2: Otpcart rotating checker
     ext_res = check_external_api(clean, timeout=6, retries=1)
     if ext_res is not None:
         return ext_res
+
+    # Engine 3: One quick retry on transient network glitch
+    time.sleep(0.5)
+    status, data = detect_user(clean)
+    if status == "existing":
+        return True, {"status": "registered", "mobile": clean, "raw": data}
+    elif status == "new":
+        return False, {"status": "not_registered", "mobile": clean, "raw": data}
 
     return False, {"status": "unknown", "mobile": clean, "raw": data}
 

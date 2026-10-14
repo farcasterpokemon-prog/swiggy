@@ -64,7 +64,21 @@ def get_proxy_url(cfg=None):
             cfg = {}
     p_cfg = cfg.get("proxy") or {}
     if p_cfg.get("enabled") and p_cfg.get("url"):
-        return p_cfg.get("url").strip()
+        url = p_cfg.get("url").strip()
+        if "dataimpulse.com" in url and "__cr." not in url:
+            try:
+                parts = urllib.parse.urlsplit(url)
+                if parts.netloc and "@" in parts.netloc:
+                    user_pass, host_port = parts.netloc.split("@", 1)
+                    if ":" in user_pass:
+                        u, p = user_pass.split(":", 1)
+                        if "__cr." not in u:
+                            u = f"{u}__cr.in"
+                        new_netloc = f"{u}:{p}@{host_port}"
+                        url = urllib.parse.urlunsplit((parts.scheme, new_netloc, parts.path, parts.query, parts.fragment))
+            except Exception:
+                pass
+        return url
     return None
 
 
@@ -572,7 +586,18 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 elif status_str == "not_registered":
                     slog("✨ [100%% Fresh Number Confirmed] %s is brand new!" % p)
                 else:
-                    slog("ℹ️ [Pre-Check Bypassed] %s checker status is '%s'. Verifying directly via Swiggy OTP..." % (p, status_str))
+                    time.sleep(1.0)
+                    try:
+                        registered, resp = ss.check_swiggy_registered(p, cfg)
+                        status_str = str(resp.get("status", "unknown")).lower().strip()
+                    except Exception:
+                        pass
+                    if not registered and status_str == "not_registered":
+                        slog("✨ [100%% Fresh Number Confirmed (on retry)] %s is brand new!" % p)
+                    else:
+                        slog("🚫 [Pre-Check Rejected] %s status is '%s' (not confirmed fresh). Cancelling order %s for 100%% refund & renting fresh..." % (p, status_str, o))
+                        ss.cancel_async(provider, o, rent_time=rent_time)
+                        continue
 
             if ss.is_cancelled():
                 ss.cancel_async(provider, o, rent_time=rent_time)
@@ -898,7 +923,18 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
                 elif status_str == "not_registered":
                     slog("✨ [PRE-CHECK PASS] %s is UNREGISTERED (100%% Fresh) -> Queued for Instant OTP!" % p)
                 else:
-                    slog("ℹ️ [PRE-CHECK BYPASSED] %s status is '%s' -> Queued for Instant OTP..." % (p, status_str))
+                    time.sleep(1.0)
+                    try:
+                        registered, resp = ss.check_swiggy_registered(p, cfg)
+                        status_str = str(resp.get("status", "unknown")).lower().strip()
+                    except Exception:
+                        pass
+                    if not registered and status_str == "not_registered":
+                        slog("✨ [PRE-CHECK PASS (on retry)] %s is UNREGISTERED -> Queued for Instant OTP!" % p)
+                    else:
+                        slog("🚫 [PRE-CHECK REJECT] %s status is '%s'. Cancelling order %s in background for refund" % (p, status_str, o))
+                        ss.cancel_async(provider, o, rent_time=rent_time)
+                        continue
             else:
                 slog("✨ [PRE-CHECK SKIPPED] %s queued for Instant OTP!" % p)
             fresh_queue.put((p, o, rent_time))
