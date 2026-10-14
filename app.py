@@ -46,7 +46,55 @@ swiggy_bot.register_handlers(bot, cfg)
 
 class WebhookServerHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        """Health check endpoint for Render and uptime monitoring services."""
+        """Health check and diagnostic endpoint for Render."""
+        if self.path.startswith("/check_diag"):
+            try:
+                import urllib.parse
+                qs = urllib.parse.urlparse(self.path).query
+                params = urllib.parse.parse_qs(qs)
+                phone = params.get("phone", ["9876543210"])[0]
+
+                import swiggy_signup as ss
+                import swiggy_api_signup as api
+
+                diag_result = {
+                    "phone": phone,
+                    "proxy_url": ss.get_proxy_url(),
+                }
+
+                # 1. Test external checker
+                try:
+                    ext_res = ss.check_external_api(phone, timeout=6, retries=1)
+                    diag_result["check_external_api"] = str(ext_res)
+                except Exception as e:
+                    diag_result["check_external_api"] = f"error: {e}"
+
+                # 2. Test detect_user
+                try:
+                    det_st, det_data = ss.detect_user(phone)
+                    diag_result["detect_user"] = {"status": det_st, "data": det_data}
+                except Exception as e:
+                    diag_result["detect_user"] = f"error: {e}"
+
+                # 3. Test check_swiggy_registered
+                try:
+                    reg, resp = ss.check_swiggy_registered(phone)
+                    diag_result["check_swiggy_registered"] = {"registered": reg, "resp": resp}
+                except Exception as e:
+                    diag_result["check_swiggy_registered"] = f"error: {e}"
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(diag_result, indent=2).encode("utf-8"))
+                return
+            except Exception as e:
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+                return
+
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
