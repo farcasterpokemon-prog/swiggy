@@ -114,7 +114,7 @@
   },
   "proxy": {
     "enabled": true,
-    "url": "http://86e8401105dc5c8981c2__cr.in:19cdda063ffc8bfa@gw.dataimpulse.com:823/"
+    "url": "http://86e8401105dc5c8981c2:19cdda063ffc8bfa@gw.dataimpulse.com:823"
   },
   "ui": {
     "phone_field_keywords": [
