@@ -826,11 +826,21 @@ def generate_random_email(name):
 def get_signup_check_headers(device_id=None):
     dev = str(device_id or uuid.uuid4().hex[:16])
     return {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Mobile Safari/537.36",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
+        "pl-version": "140",
+        "user-agent": "Swiggy-Android",
+        "content-type": "application/json; charset=utf-8",
+        "version-code": "1807",
+        "app-version": "4.114.2",
+        "latitude": "0.0",
+        "longitude": "0.0",
+        "os-version": "7.1.2",
+        "accessibility_enabled": "false",
         "swuid": dev,
         "deviceid": dev,
+        "x-network-quality": "GOOD",
+        "faw-flags": "1354",
+        "accept-encoding": "gzip",
+        "accept": "application/json; charset=utf-8",
     }
 
 
@@ -849,19 +859,16 @@ def get_checker_session():
     return CHECKER_SESSION
 
 
+PROXY_WAF_COOLDOWN_UNTIL = 0.0
+PROXY_WAF_COOLDOWN_LOCK = threading.Lock()
+
+
 def detect_user(mobile, session=None):
     """
     Check if a Swiggy mobile number is new or existing directly via Swiggy API.
-    
-    Args:
-        mobile: 10-digit mobile number (str or int)
-        session: optional requests.Session (reuses TCP connection)
-    
-    Returns:
-        "new", data       → user does not exist on Swiggy (100% fresh)
-        "existing", data  → user already has a Swiggy account
-        "unknown", data   → network error or unexpected response
+    Uses official Swiggy-Android headers with automatic direct fallback if proxy is blocked.
     """
+    global PROXY_WAF_COOLDOWN_UNTIL
     clean = re.sub(r"\D", "", str(mobile).strip())
     if len(clean) > 10 and clean.startswith("91"):
         clean = clean[2:]
@@ -876,20 +883,38 @@ def detect_user(mobile, session=None):
 
     headers = get_signup_check_headers(device_id)
     payload = {"email": email, "mobile": clean, "name": name}
+    data_bytes = json.dumps(payload).encode("utf-8")
+    url = "https://profile.swiggy.com/api/v2/app/signup"
+
+    def _execute(use_proxy):
+        req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
+        if use_proxy:
+            proxy_url = get_proxy_url()
+            if proxy_url:
+                opener = get_opener(proxy_url)
+                return opener.open(req, timeout=2.5)
+        return urllib.request.urlopen(req, timeout=3.5)
 
     try:
-        req = urllib.request.Request(
-            "https://profile.swiggy.com/api/v2/app/signup",
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
         proxy_url = get_proxy_url()
-        if proxy_url:
-            opener = get_opener(proxy_url)
-            cm = opener.open(req, timeout=3.0)
+        cm = None
+        now = time.time()
+        if proxy_url and now >= PROXY_WAF_COOLDOWN_UNTIL:
+            try:
+                cm = _execute(use_proxy=True)
+            except urllib.error.HTTPError as he:
+                if he.code in (403, 429, 502, 503, 504):
+                    with PROXY_WAF_COOLDOWN_LOCK:
+                        PROXY_WAF_COOLDOWN_UNTIL = time.time() + 60.0
+                    cm = _execute(use_proxy=False)
+                else:
+                    return "unknown", {"error": f"HTTP {he.code}"}
+            except Exception:
+                with PROXY_WAF_COOLDOWN_LOCK:
+                    PROXY_WAF_COOLDOWN_UNTIL = time.time() + 30.0
+                cm = _execute(use_proxy=False)
         else:
-            cm = urllib.request.urlopen(req, timeout=3.0)
+            cm = _execute(use_proxy=False)
 
         with cm as r:
             raw = r.read()
@@ -909,6 +934,19 @@ def detect_user(mobile, session=None):
         if code == 0 and ("done successfully" in msg or data.get("statusCode") == 0):
             return "new", data
         return "unknown", data
+    except urllib.error.HTTPError as he:
+        try:
+            raw = he.read()
+            data = json.loads(raw.decode("utf-8", "replace"))
+            msg = (data.get("statusMessage") or "").lower()
+            code = data.get("statusCode")
+            if code == 3 or "already exist" in msg or "already registered" in msg:
+                return "existing", data
+            if code == 0 and ("done successfully" in msg or code == 0):
+                return "new", data
+        except Exception:
+            pass
+        return "unknown", {"error": f"HTTP {he.code}"}
     except Exception as e:
         return "unknown", {"error": str(e)}
 
@@ -917,7 +955,7 @@ NATIVE_COOLDOWN_UNTIL = 0.0
 NATIVE_COOLDOWN_LOCK = threading.Lock()
 
 
-def check_external_api(clean, timeout=10, retries=2):
+def check_external_api(clean, timeout=6, retries=1):
     url = "https://checker.otpcart.xyz/api/check-swiggy"
     payload = json.dumps({"mobile": clean, "phone": clean}).encode("utf-8")
     headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
@@ -932,7 +970,7 @@ def check_external_api(clean, timeout=10, retries=2):
                     return True, {"status": "registered", "mobile": clean, "raw": data}
                 elif st == "not_registered":
                     return False, {"status": "not_registered", "mobile": clean, "raw": data}
-        except Exception as e:
+        except Exception:
             if attempt < retries - 1:
                 time.sleep(0.5)
                 continue
@@ -942,8 +980,8 @@ def check_external_api(clean, timeout=10, retries=2):
 def check_swiggy_registered(mobile, cfg=None):
     """
     High-Speed Dual-Engine Swiggy Registration Checker.
-    1. If user configured a custom proxy, runs Native Swiggy directly through proxy with high speed.
-    2. Otherwise, attempts Native Swiggy; if blocked, immediately queries Otpcart rotating proxy with zero timer delay.
+    1. Runs Native Swiggy with official app signatures & instant direct fallback (0.3s).
+    2. If Native Swiggy was inconclusive, queries Otpcart backup checker.
     """
     clean = re.sub(r"\D", "", str(mobile).strip())
     if len(clean) > 10 and clean.startswith("91"):
@@ -953,29 +991,15 @@ def check_swiggy_registered(mobile, cfg=None):
     elif len(clean) > 10:
         clean = clean[-10:]
 
-    proxy_url = get_proxy_url()
-    # Path A: Custom Proxy Enabled (Highest speed direct checking)
-    if proxy_url:
-        status, data = detect_user(clean)
-        if status == "existing":
-            return True, {"status": "registered", "mobile": clean, "raw": data}
-        elif status == "new":
-            return False, {"status": "not_registered", "mobile": clean, "raw": data}
-        # Instant fallback to secondary checker if proxy had a glitch
-        ext_res = check_external_api(clean, timeout=8, retries=1)
-        if ext_res is not None:
-            return ext_res
-        return False, {"status": "unknown", "mobile": clean, "raw": data}
-
-    # Path B: Direct Native Swiggy (0.3s) with instant Otpcart fallback (zero delay)
+    # Primary check: Native Swiggy with automatic fallback
     status, data = detect_user(clean)
     if status == "existing":
         return True, {"status": "registered", "mobile": clean, "raw": data}
     elif status == "new":
         return False, {"status": "not_registered", "mobile": clean, "raw": data}
 
-    # Instant zero-wait query to Otpcart rotating residential proxy
-    ext_res = check_external_api(clean, timeout=8, retries=1)
+    # Backup check: Otpcart rotating proxy
+    ext_res = check_external_api(clean, timeout=6, retries=1)
     if ext_res is not None:
         return ext_res
 
@@ -1346,8 +1370,8 @@ def rent_and_check(provider, cfg, count, retries=6):
             log("checker error for %s (%s); cancelling number" % (phone, e))
             cancel_async(provider, order)
             return None
-        if registered or status_str != "not_registered":
-            log("number %s status is '%s' (not strictly unregistered) -> cancelling in background" % (phone, status_str))
+        if registered or status_str == "registered":
+            log("number %s is registered on Swiggy -> cancelling in background for refund" % phone)
             cancel_async(provider, order)
             return None
         return (phone, order)

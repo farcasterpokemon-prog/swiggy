@@ -120,15 +120,20 @@ def call(method, path, body=None, headers=None, timeout=30, proxy_url=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(BASE + path, data=data, headers=headers or {}, method=method)
     p_url = proxy_url if proxy_url is not None else get_proxy_url()
+    now = time.time()
     try:
-        if p_url:
+        waf_cooldown = getattr(ss, "PROXY_WAF_COOLDOWN_UNTIL", 0.0)
+        if p_url and now >= waf_cooldown:
             try:
                 opener = get_opener(p_url)
                 cm = opener.open(req, timeout=timeout)
                 with cm as resp:
                     return resp.status, _read(resp)
             except urllib.error.HTTPError as he:
-                if he.code == 403:
+                if he.code in (403, 429, 502, 503, 504):
+                    if hasattr(ss, "PROXY_WAF_COOLDOWN_LOCK"):
+                        with ss.PROXY_WAF_COOLDOWN_LOCK:
+                            ss.PROXY_WAF_COOLDOWN_UNTIL = time.time() + 60.0
                     cm = urllib.request.urlopen(req, timeout=timeout)
                     with cm as resp:
                         return resp.status, _read(resp)
@@ -564,31 +569,10 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                     slog("🚫 [Already Registered] %s was previously used on Swiggy. Cancelling order %s for 100%% refund & renting fresh number..." % (p, o))
                     ss.cancel_async(provider, o, rent_time=rent_time)
                     continue
-                elif status_str != "not_registered":
-                    # If unknown, retry once after a short pause before cancelling
-                    if status_str == "unknown":
-                        time.sleep(1.2)
-                        try:
-                            registered, resp = ss.check_swiggy_registered(p, cfg)
-                            status_str = str(resp.get("status", "unknown")).lower().strip()
-                        except Exception:
-                            pass
-                        if not registered and status_str == "not_registered":
-                            slog("✨ [100%% Fresh Number Confirmed (on retry)] %s is brand new!" % p)
-                        elif registered or status_str == "registered":
-                            slog("🚫 [Already Registered] %s was previously used on Swiggy. Cancelling order %s for 100%% refund..." % (p, o))
-                            ss.cancel_async(provider, o, rent_time=rent_time)
-                            continue
-                        else:
-                            slog("🚫 [Pre-Check Rejected] %s status is '%s'. Cancelling order %s for 100%% refund & renting next..." % (p, status_str, o))
-                            ss.cancel_async(provider, o, rent_time=rent_time)
-                            continue
-                    else:
-                        slog("🚫 [Pre-Check Rejected] %s status is '%s' (not confirmed fresh). Cancelling order %s for 100%% refund & renting next..." % (p, status_str, o))
-                        ss.cancel_async(provider, o, rent_time=rent_time)
-                        continue
-                else:
+                elif status_str == "not_registered":
                     slog("✨ [100%% Fresh Number Confirmed] %s is brand new!" % p)
+                else:
+                    slog("ℹ️ [Pre-Check Bypassed] %s checker status is '%s'. Verifying directly via Swiggy OTP..." % (p, status_str))
 
             if ss.is_cancelled():
                 ss.cancel_async(provider, o, rent_time=rent_time)
@@ -911,13 +895,10 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
                     slog("🚫 [PRE-CHECK REJECT] %s is REGISTERED on Swiggy -> Cancelling order %s in background for refund" % (p, o))
                     ss.cancel_async(provider, o, rent_time=rent_time)
                     continue
-
-                if status_str != "not_registered":
-                    slog("🚫 [PRE-CHECK REJECT] %s status is '%s' (not confirmed fresh) -> Cancelling order %s for 100%% refund & renting fresh..." % (p, status_str, o))
-                    ss.cancel_async(provider, o, rent_time=rent_time)
-                    continue
-
-                slog("✨ [PRE-CHECK PASS] %s is UNREGISTERED (100%% Fresh) -> Queued for Instant OTP!" % p)
+                elif status_str == "not_registered":
+                    slog("✨ [PRE-CHECK PASS] %s is UNREGISTERED (100%% Fresh) -> Queued for Instant OTP!" % p)
+                else:
+                    slog("ℹ️ [PRE-CHECK BYPASSED] %s status is '%s' -> Queued for Instant OTP..." % (p, status_str))
             else:
                 slog("✨ [PRE-CHECK SKIPPED] %s queued for Instant OTP!" % p)
             fresh_queue.put((p, o, rent_time))
