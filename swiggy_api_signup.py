@@ -122,12 +122,25 @@ def call(method, path, body=None, headers=None, timeout=30, proxy_url=None):
     p_url = proxy_url if proxy_url is not None else get_proxy_url()
     try:
         if p_url:
-            opener = get_opener(p_url)
-            cm = opener.open(req, timeout=timeout)
+            try:
+                opener = get_opener(p_url)
+                cm = opener.open(req, timeout=timeout)
+                with cm as resp:
+                    return resp.status, _read(resp)
+            except urllib.error.HTTPError as he:
+                if he.code == 403:
+                    cm = urllib.request.urlopen(req, timeout=timeout)
+                    with cm as resp:
+                        return resp.status, _read(resp)
+                return he.code, _read(he)
+            except Exception:
+                cm = urllib.request.urlopen(req, timeout=timeout)
+                with cm as resp:
+                    return resp.status, _read(resp)
         else:
             cm = urllib.request.urlopen(req, timeout=timeout)
-        with cm as resp:
-            return resp.status, _read(resp)
+            with cm as resp:
+                return resp.status, _read(resp)
     except urllib.error.HTTPError as e:
         return e.code, _read(e)
     except Exception as e:
