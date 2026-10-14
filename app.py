@@ -29,6 +29,7 @@ logger = logging.getLogger("SwiggyWebhookRunner")
 PORT = int(os.environ.get("PORT", 10000))
 SERVICE_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://swiggy-telegram-bot.onrender.com").rstrip("/")
 WEBHOOK_URL = f"{SERVICE_URL}/webhook"
+RECENT_UPDATES = []
 
 import swiggy_bot
 
@@ -83,6 +84,28 @@ class WebhookServerHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
                 return
 
+        if self.path.startswith("/bot_diag"):
+            try:
+                import swiggy_bot
+                import swiggy_signup as ss
+                diag = {
+                    "running": swiggy_bot.RUNNING,
+                    "active_orders": ss.load_active_orders(),
+                    "recent_updates": RECENT_UPDATES,
+                    "provider_balance": ss.get_provider_balance(),
+                }
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(diag, indent=2).encode("utf-8"))
+                return
+            except Exception as e:
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+                return
+
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -110,9 +133,20 @@ class WebhookServerHandler(http.server.BaseHTTPRequestHandler):
             # Process Telegram Update in background thread
             if post_data:
                 update_dict = json.loads(post_data.decode("utf-8"))
+                RECENT_UPDATES.append({"time": time.time(), "update": update_dict})
+                if len(RECENT_UPDATES) > 20:
+                    RECENT_UPDATES.pop(0)
                 update = telebot.types.Update.de_json(update_dict)
                 if update:
-                    threading.Thread(target=bot.process_new_updates, args=([update],), daemon=True).start()
+                    def _handle(u):
+                        try:
+                            msg = getattr(u, "message", None)
+                            if msg and msg.text:
+                                logger.info(f"Incoming command: '{msg.text}' from chat {msg.chat.id}")
+                            bot.process_new_updates([u])
+                        except Exception as ex:
+                            logger.error(f"Error in process_new_updates: {ex}", exc_info=True)
+                    threading.Thread(target=_handle, args=(update,), daemon=True).start()
         except Exception as e:
             logger.error(f"Error handling webhook POST: {e}")
 

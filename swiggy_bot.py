@@ -58,29 +58,34 @@ def safe_reply(bot, msg, text, parse_mode="Markdown", reply_markup=None):
     global LAST_MESSAGE_TIME
     if not bot or not msg:
         return None
+    chat_id = getattr(msg, "chat", None)
+    chat_id = chat_id.id if chat_id else getattr(msg, "chat_id", None)
     try:
         with OUTBOUND_LOCK:
             now = time.time()
             gap = now - LAST_MESSAGE_TIME
-            if gap < 1.3:
-                time.sleep(1.3 - gap)
+            if gap < 1.1:
+                time.sleep(1.1 - gap)
             LAST_MESSAGE_TIME = time.time()
 
         if len(text) > 4000:
             text = text[:4000]
-        return bot.reply_to(msg, text, parse_mode=parse_mode, reply_markup=reply_markup)
-    except telebot.apihelper.ApiTelegramException as e:
-        if e.error_code == 429:
-            log(f"safe_reply 429 rate limit: {e.description}")
-            return None
         try:
-            return bot.reply_to(msg, text, reply_markup=reply_markup)
-        except Exception as e2:
-            log(f"safe_reply fallback failed: {e2}")
-            return None
+            return bot.reply_to(msg, text, parse_mode=parse_mode, reply_markup=reply_markup)
+        except Exception:
+            try:
+                return bot.reply_to(msg, text, parse_mode=None, reply_markup=reply_markup)
+            except Exception:
+                if chat_id:
+                    return bot.send_message(chat_id, text, parse_mode=None, reply_markup=reply_markup)
     except Exception as e:
         log(f"safe_reply failed: {e}")
-        return None
+        if chat_id:
+            try:
+                return bot.send_message(chat_id, text, parse_mode=None, reply_markup=reply_markup)
+            except Exception:
+                pass
+    return None
 
 
 def safe_send_message(bot, chat_id, text, parse_mode="Markdown", reply_markup=None):
