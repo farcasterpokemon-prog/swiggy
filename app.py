@@ -62,31 +62,14 @@ class WebhookServerHandler(http.server.BaseHTTPRequestHandler):
                     "proxy_url": ss.get_proxy_url(),
                 }
 
-                # 1. Test external checker
-                try:
-                    ext_res = ss.check_external_api(phone, timeout=4, retries=1)
-                    diag_result["check_external_api"] = str(ext_res)
-                except Exception as e:
-                    diag_result["check_external_api"] = f"error: {e}"
-
-                # 2. Test check_swiggy_registered (Production checker flow)
-                try:
-                    t_chk = time.time()
-                    reg, resp = ss.check_swiggy_registered(phone)
-                    diag_result["check_swiggy_registered"] = {
-                        "registered": reg,
-                        "resp": resp,
-                        "latency_sec": round(time.time() - t_chk, 2)
-                    }
-                except Exception as e:
-                    diag_result["check_swiggy_registered"] = f"error: {e}"
-
-                # 3. Test detect_user (Secondary native fallback)
-                try:
-                    det_st, det_data = ss.detect_user(phone)
-                    diag_result["detect_user"] = {"status": det_st, "data": det_data}
-                except Exception as e:
-                    diag_result["detect_user"] = f"error: {e}"
+                # Primary Production Checker Flow
+                t_chk = time.time()
+                reg, resp = ss.check_swiggy_registered(phone)
+                diag_result["check_swiggy_registered"] = {
+                    "registered": reg,
+                    "resp": resp,
+                    "latency_sec": round(time.time() - t_chk, 2)
+                }
 
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")

@@ -1003,8 +1003,8 @@ def check_external_api(clean, timeout=2.5, retries=1):
 def check_swiggy_registered(mobile, cfg=None):
     """
     High-Speed Dual-Engine Swiggy Registration Checker.
-    1. Primary: Dedicated high-speed Otpcart rotating checker pool (1-2s response, no WAF blocks).
-    2. Secondary Failover: Native Swiggy with Indian residential proxy if primary checker is unreachable.
+    1. Primary Engine: Native Swiggy via persistent pooled session & Indian residential proxy (1.5s avg, 100% authoritative).
+    2. Secondary Failover: Otpcart rotating checker backup.
     """
     clean = re.sub(r"\D", "", str(mobile).strip())
     if len(clean) > 10 and clean.startswith("91"):
@@ -1014,17 +1014,17 @@ def check_swiggy_registered(mobile, cfg=None):
     elif len(clean) > 10:
         clean = clean[-10:]
 
-    # Engine 1: Primary High-Speed Dedicated Pool (Otpcart - 1.2s avg)
-    ext_res = check_external_api(clean, timeout=4, retries=2)
-    if ext_res is not None:
-        return ext_res
-
-    # Engine 2: Secondary Failover via Native Swiggy with Indian residential proxy
+    # Engine 1: Native Swiggy via persistent pooled Indian proxy session (1.5s avg)
     status, data = detect_user(clean)
     if status == "existing":
         return True, {"status": "registered", "mobile": clean, "raw": data}
     elif status == "new":
         return False, {"status": "not_registered", "mobile": clean, "raw": data}
+
+    # Engine 2: Otpcart backup rotating checker
+    ext_res = check_external_api(clean, timeout=3, retries=1)
+    if ext_res is not None:
+        return ext_res
 
     return False, {"status": "unknown", "mobile": clean, "raw": data}
 
