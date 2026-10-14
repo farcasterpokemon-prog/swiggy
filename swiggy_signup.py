@@ -887,9 +887,9 @@ def detect_user(mobile, session=None):
         proxy_url = get_proxy_url()
         if proxy_url:
             opener = get_opener(proxy_url)
-            cm = opener.open(req, timeout=8)
+            cm = opener.open(req, timeout=3.0)
         else:
-            cm = urllib.request.urlopen(req, timeout=8)
+            cm = urllib.request.urlopen(req, timeout=3.0)
 
         with cm as r:
             raw = r.read()
@@ -913,34 +913,38 @@ def detect_user(mobile, session=None):
         return "unknown", {"error": str(e)}
 
 
-def check_external_api(clean):
-    try:
-        url = "https://checker.otpcart.xyz/api/check-swiggy"
-        req = urllib.request.Request(
-            url,
-            data=json.dumps({"mobile": clean, "phone": clean}).encode("utf-8"),
-            headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=5) as r:
-            data = json.loads(r.read().decode("utf-8", "replace"))
-            st = str(data.get("status", "")).lower()
-            if st == "registered":
-                return True, {"status": "registered", "mobile": clean, "raw": data}
-            elif st == "not_registered":
-                return False, {"status": "not_registered", "mobile": clean, "raw": data}
-    except Exception:
-        pass
+NATIVE_COOLDOWN_UNTIL = 0.0
+NATIVE_COOLDOWN_LOCK = threading.Lock()
+
+
+def check_external_api(clean, timeout=10, retries=2):
+    url = "https://checker.otpcart.xyz/api/check-swiggy"
+    payload = json.dumps({"mobile": clean, "phone": clean}).encode("utf-8")
+    headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
+
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = json.loads(r.read().decode("utf-8", "replace"))
+                st = str(data.get("status", "")).lower()
+                if st == "registered":
+                    return True, {"status": "registered", "mobile": clean, "raw": data}
+                elif st == "not_registered":
+                    return False, {"status": "not_registered", "mobile": clean, "raw": data}
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(0.5)
+                continue
     return None
 
 
 def check_swiggy_registered(mobile, cfg=None):
     """
-    Dual-Engine Swiggy Registration Checker (Native Swiggy API + External Fallback).
-    Returns: (is_registered, response_dict)
-    - If user exists ('existing' / 'registered') → (True, {'status': 'registered', 'mobile': clean})
-    - If user is brand new ('new' / 'not_registered') → (False, {'status': 'not_registered', 'mobile': clean})
-    - If unknown/error ('unknown') → (False, {'status': 'unknown', 'mobile': clean})
+    Dual-Engine Swiggy Registration Checker with Automatic Circuit-Breaker.
+    1. If Native Swiggy is healthy, checks it fast (3s timeout).
+    2. If Native Swiggy hits Cloudflare 403 or rate-limits, immediately trips a 10-minute circuit-breaker.
+    3. While in cooldown, all checks route instantly to Otpcart (rotating residential proxies) with zero 20-second hangs.
     """
     clean = re.sub(r"\D", "", str(mobile).strip())
     if len(clean) > 10 and clean.startswith("91"):
@@ -950,17 +954,35 @@ def check_swiggy_registered(mobile, cfg=None):
     elif len(clean) > 10:
         clean = clean[-10:]
 
-    status, data = detect_user(clean)
-    if status == "existing":
-        return True, {"status": "registered", "mobile": clean, "raw": data}
-    elif status == "new":
-        return False, {"status": "not_registered", "mobile": clean, "raw": data}
-    else:
-        # Fail-safe fallback to secondary checker
-        ext_res = check_external_api(clean)
-        if ext_res is not None:
-            return ext_res
-        return False, {"status": "unknown", "mobile": clean, "raw": data}
+    global NATIVE_COOLDOWN_UNTIL
+    now = time.time()
+
+    # Engine 1: Native Swiggy (only if not in cooldown)
+    if now >= NATIVE_COOLDOWN_UNTIL:
+        status, data = detect_user(clean)
+        if status == "existing":
+            return True, {"status": "registered", "mobile": clean, "raw": data}
+        elif status == "new":
+            return False, {"status": "not_registered", "mobile": clean, "raw": data}
+        else:
+            # Native Swiggy rate-limited, 403 Forbidden, or timed out. Trip 10m circuit breaker!
+            with NATIVE_COOLDOWN_LOCK:
+                NATIVE_COOLDOWN_UNTIL = time.time() + 600.0
+            log(f"⚡ [Checker Circuit-Breaker] Native Swiggy blocked ({data.get('error', 'error')}). Tripping 10m cooldown and routing all checks directly to Otpcart rotating proxy engine.")
+
+    # Engine 2: Otpcart Checker (Dedicated Rotating Residential Proxies)
+    ext_res = check_external_api(clean, timeout=10, retries=2)
+    if ext_res is not None:
+        return ext_res
+
+    # Fallback retry if Otpcart had a momentary proxy timeout
+    if now < NATIVE_COOLDOWN_UNTIL:
+        time.sleep(0.5)
+        ext_res2 = check_external_api(clean, timeout=12, retries=1)
+        if ext_res2 is not None:
+            return ext_res2
+
+    return False, {"status": "unknown", "mobile": clean, "raw": {"error": "both checker engines unavailable"}}
 
 
 def make_provider(op):

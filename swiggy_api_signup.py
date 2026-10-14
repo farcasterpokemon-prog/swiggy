@@ -552,9 +552,28 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                     ss.cancel_async(provider, o, rent_time=rent_time)
                     continue
                 elif status_str != "not_registered":
-                    slog("🚫 [Pre-Check Rejected] %s status is '%s' (not confirmed fresh). Cancelling order %s for 100%% refund & renting next..." % (p, status_str, o))
-                    ss.cancel_async(provider, o, rent_time=rent_time)
-                    continue
+                    # If unknown, retry once after a short pause before cancelling
+                    if status_str == "unknown":
+                        time.sleep(1.2)
+                        try:
+                            registered, resp = ss.check_swiggy_registered(p, cfg)
+                            status_str = str(resp.get("status", "unknown")).lower().strip()
+                        except Exception:
+                            pass
+                        if not registered and status_str == "not_registered":
+                            slog("✨ [100%% Fresh Number Confirmed (on retry)] %s is brand new!" % p)
+                        elif registered or status_str == "registered":
+                            slog("🚫 [Already Registered] %s was previously used on Swiggy. Cancelling order %s for 100%% refund..." % (p, o))
+                            ss.cancel_async(provider, o, rent_time=rent_time)
+                            continue
+                        else:
+                            slog("🚫 [Pre-Check Rejected] %s status is '%s'. Cancelling order %s for 100%% refund & renting next..." % (p, status_str, o))
+                            ss.cancel_async(provider, o, rent_time=rent_time)
+                            continue
+                    else:
+                        slog("🚫 [Pre-Check Rejected] %s status is '%s' (not confirmed fresh). Cancelling order %s for 100%% refund & renting next..." % (p, status_str, o))
+                        ss.cancel_async(provider, o, rent_time=rent_time)
+                        continue
                 else:
                     slog("✨ [100%% Fresh Number Confirmed] %s is brand new!" % p)
 
