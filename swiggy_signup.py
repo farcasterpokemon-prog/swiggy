@@ -866,18 +866,28 @@ CHECKER_SESSION_LOCK = threading.Lock()
 def get_checker_session():
     global CHECKER_SESSION
     if CHECKER_SESSION is None:
-        try:
-            import requests
-            CHECKER_SESSION = requests.Session()
-        except Exception:
-            pass
-    return CHECKER_SESSION
+        with CHECKER_SESSION_LOCK:
+            if CHECKER_SESSION is None:
+                try:
+                    import requests
+                    from requests.adapters import HTTPAdapter
+                    s = requests.Session()
+                    proxy_url = get_proxy_url()
+                    if proxy_url:
+                        s.proxies = {"http": proxy_url, "https": proxy_url}
+                    adapter = HTTPAdapter(pool_connections=25, pool_maxsize=50)
+                    s.mount("https://", adapter)
+                    s.mount("http://", adapter)
+                    CHECKER_SESSION = s
+                except Exception:
+                    CHECKER_SESSION = False
+    return CHECKER_SESSION if CHECKER_SESSION is not False else None
 
 
 def detect_user(mobile, session=None):
     """
     Check if a Swiggy mobile number is new or existing directly via Swiggy API.
-    Uses official Swiggy-Android headers with Indian residential proxy and auto-fallback.
+    Uses official Swiggy-Android headers with Indian residential proxy via persistent pooled session.
     """
     clean = re.sub(r"\D", "", str(mobile).strip())
     if len(clean) > 10 and clean.startswith("91"):
@@ -893,17 +903,32 @@ def detect_user(mobile, session=None):
 
     headers = get_signup_check_headers(device_id)
     payload = {"email": email, "mobile": clean, "name": name}
-    data_bytes = json.dumps(payload).encode("utf-8")
     url = "https://profile.swiggy.com/api/v2/app/signup"
 
+    sess = session or get_checker_session()
+    if sess is not None:
+        try:
+            r = sess.post(url, json=payload, headers=headers, timeout=5.0)
+            data = r.json()
+            msg = (data.get("statusMessage") or "").lower()
+            code = data.get("statusCode")
+            if code == 3 or "already exist" in msg or "already registered" in msg:
+                return "existing", data
+            if code == 0 and ("done successfully" in msg or code == 0):
+                return "new", data
+            return "unknown", data
+        except Exception:
+            pass
+
     proxy_url = get_proxy_url()
+    data_bytes = json.dumps(payload).encode("utf-8")
 
     def _execute(use_proxy):
         req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
         if use_proxy and proxy_url:
             opener = get_opener(proxy_url)
-            return opener.open(req, timeout=8.0)
-        return urllib.request.urlopen(req, timeout=6.0)
+            return opener.open(req, timeout=4.0)
+        return urllib.request.urlopen(req, timeout=3.0)
 
     try:
         cm = None
@@ -953,7 +978,7 @@ def detect_user(mobile, session=None):
         return "unknown", {"error": str(e)}
 
 
-def check_external_api(clean, timeout=6, retries=1):
+def check_external_api(clean, timeout=2.5, retries=1):
     url = "https://checker.otpcart.xyz/api/check-swiggy"
     payload = json.dumps({"mobile": clean, "phone": clean}).encode("utf-8")
     headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
@@ -970,7 +995,7 @@ def check_external_api(clean, timeout=6, retries=1):
                     return False, {"status": "not_registered", "mobile": clean, "raw": data}
         except Exception:
             if attempt < retries - 1:
-                time.sleep(0.5)
+                time.sleep(0.2)
                 continue
     return None
 
@@ -978,9 +1003,8 @@ def check_external_api(clean, timeout=6, retries=1):
 def check_swiggy_registered(mobile, cfg=None):
     """
     High-Speed Dual-Engine Swiggy Registration Checker.
-    1. Primary: Native Swiggy with official app signatures & Indian residential proxy (0.5s - 2s).
-    2. Secondary: Otpcart backup rotating checker.
-    3. Final retry: If indeterminate, re-probes once to guarantee strict fresh verification.
+    1. Primary: Dedicated high-speed Otpcart rotating checker pool (1-2s response, no WAF blocks).
+    2. Secondary Failover: Native Swiggy with Indian residential proxy if primary checker is unreachable.
     """
     clean = re.sub(r"\D", "", str(mobile).strip())
     if len(clean) > 10 and clean.startswith("91"):
@@ -990,20 +1014,12 @@ def check_swiggy_registered(mobile, cfg=None):
     elif len(clean) > 10:
         clean = clean[-10:]
 
-    # Engine 1: Native Swiggy via Indian residential proxy
-    status, data = detect_user(clean)
-    if status == "existing":
-        return True, {"status": "registered", "mobile": clean, "raw": data}
-    elif status == "new":
-        return False, {"status": "not_registered", "mobile": clean, "raw": data}
-
-    # Engine 2: Otpcart rotating checker
-    ext_res = check_external_api(clean, timeout=6, retries=1)
+    # Engine 1: Primary High-Speed Dedicated Pool (Otpcart - 1.2s avg)
+    ext_res = check_external_api(clean, timeout=4, retries=2)
     if ext_res is not None:
         return ext_res
 
-    # Engine 3: One quick retry on transient network glitch
-    time.sleep(0.5)
+    # Engine 2: Secondary Failover via Native Swiggy with Indian residential proxy
     status, data = detect_user(clean)
     if status == "existing":
         return True, {"status": "registered", "mobile": clean, "raw": data}

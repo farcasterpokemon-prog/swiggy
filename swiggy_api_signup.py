@@ -586,7 +586,7 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 elif status_str == "not_registered":
                     slog("✨ [100%% Fresh Number Confirmed] %s is brand new!" % p)
                 else:
-                    time.sleep(1.0)
+                    time.sleep(0.5)
                     try:
                         registered, resp = ss.check_swiggy_registered(p, cfg)
                         status_str = str(resp.get("status", "unknown")).lower().strip()
@@ -923,7 +923,7 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
                 elif status_str == "not_registered":
                     slog("✨ [PRE-CHECK PASS] %s is UNREGISTERED (100%% Fresh) -> Queued for Instant OTP!" % p)
                 else:
-                    time.sleep(1.0)
+                    time.sleep(0.5)
                     try:
                         registered, resp = ss.check_swiggy_registered(p, cfg)
                         status_str = str(resp.get("status", "unknown")).lower().strip()
