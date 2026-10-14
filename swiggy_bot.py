@@ -521,11 +521,12 @@ def create_accounts(chat_id, count, bot):
                 return
 
     try:
-        max_workers = min(count, 8)
+        cfg_workers = cfg.get("workers") or (op.get("workers") if isinstance(op, dict) else 25) or 25
+        max_workers = min(count, int(cfg_workers))
         safe_send_message(
             bot,
             chat_id,
-            f"🚀 Starting creation of {count} account(s) via {op.get('type', 'OTP').upper()} (concurrency: {max_workers})...",
+            f"🚀 Starting creation of {count} account(s) via {op.get('type', 'OTP').upper()} (speed: {max_workers} parallel workers)...",
             parse_mode=None,
         )
 

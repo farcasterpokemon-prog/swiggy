@@ -941,10 +941,9 @@ def check_external_api(clean, timeout=10, retries=2):
 
 def check_swiggy_registered(mobile, cfg=None):
     """
-    Dual-Engine Swiggy Registration Checker with Automatic Circuit-Breaker.
-    1. If Native Swiggy is healthy, checks it fast (3s timeout).
-    2. If Native Swiggy hits Cloudflare 403 or rate-limits, immediately trips a 10-minute circuit-breaker.
-    3. While in cooldown, all checks route instantly to Otpcart (rotating residential proxies) with zero 20-second hangs.
+    High-Speed Dual-Engine Swiggy Registration Checker.
+    1. If user configured a custom proxy, runs Native Swiggy directly through proxy with high speed.
+    2. Otherwise, attempts Native Swiggy; if blocked, immediately queries Otpcart rotating proxy with zero timer delay.
     """
     clean = re.sub(r"\D", "", str(mobile).strip())
     if len(clean) > 10 and clean.startswith("91"):
@@ -954,35 +953,33 @@ def check_swiggy_registered(mobile, cfg=None):
     elif len(clean) > 10:
         clean = clean[-10:]
 
-    global NATIVE_COOLDOWN_UNTIL
-    now = time.time()
-
-    # Engine 1: Native Swiggy (only if not in cooldown)
-    if now >= NATIVE_COOLDOWN_UNTIL:
+    proxy_url = get_proxy_url()
+    # Path A: Custom Proxy Enabled (Highest speed direct checking)
+    if proxy_url:
         status, data = detect_user(clean)
         if status == "existing":
             return True, {"status": "registered", "mobile": clean, "raw": data}
         elif status == "new":
             return False, {"status": "not_registered", "mobile": clean, "raw": data}
-        else:
-            # Native Swiggy rate-limited, 403 Forbidden, or timed out. Trip 10m circuit breaker!
-            with NATIVE_COOLDOWN_LOCK:
-                NATIVE_COOLDOWN_UNTIL = time.time() + 600.0
-            log(f"⚡ [Checker Circuit-Breaker] Native Swiggy blocked ({data.get('error', 'error')}). Tripping 10m cooldown and routing all checks directly to Otpcart rotating proxy engine.")
+        # Instant fallback to secondary checker if proxy had a glitch
+        ext_res = check_external_api(clean, timeout=8, retries=1)
+        if ext_res is not None:
+            return ext_res
+        return False, {"status": "unknown", "mobile": clean, "raw": data}
 
-    # Engine 2: Otpcart Checker (Dedicated Rotating Residential Proxies)
-    ext_res = check_external_api(clean, timeout=10, retries=2)
+    # Path B: Direct Native Swiggy (0.3s) with instant Otpcart fallback (zero delay)
+    status, data = detect_user(clean)
+    if status == "existing":
+        return True, {"status": "registered", "mobile": clean, "raw": data}
+    elif status == "new":
+        return False, {"status": "not_registered", "mobile": clean, "raw": data}
+
+    # Instant zero-wait query to Otpcart rotating residential proxy
+    ext_res = check_external_api(clean, timeout=8, retries=1)
     if ext_res is not None:
         return ext_res
 
-    # Fallback retry if Otpcart had a momentary proxy timeout
-    if now < NATIVE_COOLDOWN_UNTIL:
-        time.sleep(0.5)
-        ext_res2 = check_external_api(clean, timeout=12, retries=1)
-        if ext_res2 is not None:
-            return ext_res2
-
-    return False, {"status": "unknown", "mobile": clean, "raw": {"error": "both checker engines unavailable"}}
+    return False, {"status": "unknown", "mobile": clean, "raw": data}
 
 
 def make_provider(op):
