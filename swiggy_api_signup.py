@@ -33,6 +33,8 @@ import swiggy_signup as ss
 LOG_HOOK = None
 INSUFFICIENT_FUNDS_LOCK = threading.Lock()
 INSUFFICIENT_PAUSE_UNTIL = 0.0
+CHECKER_BUSY_LOCK = threading.Lock()
+CHECKER_BUSY_UNTIL = 0.0
 
 
 def notify(msg):
@@ -57,59 +59,18 @@ UNVERIFIED_CTX = CTX
 
 
 def get_proxy_url(cfg=None):
-    """Retrieves configured proxy URL if enabled."""
-    if cfg is None:
-        try:
-            cfg = ss.load_config(ss.CONFIG_PATH)
-        except Exception:
-            cfg = {}
-    p_cfg = cfg.get("proxy") or {}
-    if p_cfg.get("enabled") and p_cfg.get("url"):
-        url = p_cfg.get("url").strip()
-        if "dataimpulse.com" in url and "__cr." not in url:
-            try:
-                parts = urllib.parse.urlsplit(url)
-                if parts.netloc and "@" in parts.netloc:
-                    user_pass, host_port = parts.netloc.split("@", 1)
-                    if ":" in user_pass:
-                        u, p = user_pass.split(":", 1)
-                        if "__cr." not in u:
-                            u = f"{u}__cr.in"
-                        new_netloc = f"{u}:{p}@{host_port}"
-                        url = urllib.parse.urlunsplit((parts.scheme, new_netloc, parts.path, parts.query, parts.fragment))
-            except Exception:
-                pass
-        return url
-    return None
+    """Retrieves configured proxy URL if enabled, including active rotation session."""
+    return ss.get_proxy_url(cfg)
 
 
 def get_opener(proxy_url=None):
     """Builds a urllib opener with optional proxy and unverified SSL context."""
-    if proxy_url is None:
-        proxy_url = get_proxy_url()
-    handlers = [urllib.request.HTTPSHandler(context=UNVERIFIED_CTX)]
-    if proxy_url:
-        handlers.append(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
-    return urllib.request.build_opener(*handlers)
+    return ss.get_opener(proxy_url)
 
 
 def get_current_ip(proxy_url=None):
     """Checks the public IP address routed through the active proxy."""
-    opener = get_opener(proxy_url)
-    endpoints = [
-        "https://api.ipify.org?format=json",
-        "http://ip-api.com/json",
-        "https://ifconfig.me/all.json",
-    ]
-    for url in endpoints:
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
-            with opener.open(req, timeout=12) as resp:
-                raw = resp.read().decode("utf-8", "ignore")
-                return json.loads(raw)
-        except Exception:
-            continue
-    return {"ip": "unknown", "status": "failed"}
+    return ss.get_current_ip(proxy_url)
 
 CLEAN_CLONING = {
     "appFilesDirPathInvalid": 0,
@@ -607,32 +568,47 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 elif status_str == "not_registered":
                     slog("✨ [100%% Fresh Number Confirmed] %s is brand new!" % p)
                 else:
-                    resolved = False
-                    for retry_attempt in range(1, 3):
-                        slog("⏳ [Checker Busy] %s status is '%s'; refreshing connection (attempt %d/2)..." % (p, status_str, retry_attempt))
-                        time.sleep(1.2)
-                        ss.reset_checker_session()
-                        try:
-                            registered, resp = ss.check_swiggy_registered(p, cfg)
-                            status_str = str(resp.get("status", "unknown")).lower().strip()
-                        except Exception:
-                            pass
-                        if registered or status_str == "registered":
-                            slog("🚫 [Already Registered] %s was previously used on Swiggy. Cancelling order %s for 100%% refund..." % (p, o))
-                            ss.cancel_async(provider, o, rent_time=rent_time)
-                            resolved = True
-                            break
-                        elif status_str == "not_registered":
-                            slog("✨ [100%% Fresh Number Confirmed (on retry)] %s is brand new!" % p)
-                            resolved = True
-                            break
+                    # Status is unknown or checker busy: pause 1 minute and rotate IP using proxy
+                    global CHECKER_BUSY_LOCK, CHECKER_BUSY_UNTIL
+                    now = time.time()
+                    should_rotate = False
+                    with CHECKER_BUSY_LOCK:
+                        if now >= CHECKER_BUSY_UNTIL:
+                            CHECKER_BUSY_UNTIL = now + 60.0
+                            should_rotate = True
 
-                    if resolved and (registered or status_str == "registered"):
-                        continue
-                    if not resolved or status_str != "not_registered":
-                        slog("🚫 [Pre-Check Rejected] %s status is '%s'. Cancelling order %s for 100%% refund & pausing 3s..." % (p, status_str, o))
+                    if should_rotate:
+                        slog("⏳ [Checker Busy / Status Unknown] Rate-limit detected on current IP. Pausing for 60s and rotating proxy to fresh Indian IP...")
+                        new_ip, city, country = ss.rotate_proxy_ip(cfg)
+                    else:
+                        ss.log("[%s] Checker rate-limited; waiting for active 60s proxy cooldown window..." % p)
+
+                    pause_sec = max(1.0, CHECKER_BUSY_UNTIL - time.time())
+                    if ss.cancel_sleep(pause_sec):
                         ss.cancel_async(provider, o, rent_time=rent_time)
-                        time.sleep(3.0)
+                        return None
+
+                    if should_rotate:
+                        slog("🔄 [Proxy IP Rotated] Resumed after 60s pause! New Routed IP: %s (%s, %s). Re-checking number %s..." % (new_ip, city, country, p))
+                    else:
+                        slog("🔄 [Checker Resumed] Re-checking number %s with fresh proxy connection..." % p)
+
+                    # Re-check the number with the new IP
+                    try:
+                        registered, resp = ss.check_swiggy_registered(p, cfg)
+                        status_str = str(resp.get("status", "unknown")).lower().strip()
+                    except Exception:
+                        status_str = "unknown"
+
+                    if registered or status_str == "registered":
+                        slog("🚫 [Already Registered] %s was previously used on Swiggy. Cancelling order %s for 100%% refund & renting fresh number..." % (p, o))
+                        ss.cancel_async(provider, o, rent_time=rent_time)
+                        continue
+                    elif status_str == "not_registered":
+                        slog("✨ [100%% Fresh Number Confirmed (after IP rotation)] %s is brand new!" % p)
+                    else:
+                        slog("🚫 [Pre-Check Unresolved] %s status is still '%s' after proxy rotation. Cancelling order %s for 100%% refund & buying next..." % (p, status_str, o))
+                        ss.cancel_async(provider, o, rent_time=rent_time)
                         continue
 
             if ss.is_cancelled():

@@ -41,6 +41,9 @@ CTX.check_hostname = False
 CTX.verify_mode = ssl.CERT_NONE
 UNVERIFIED_CTX = CTX
 
+CURRENT_PROXY_SESSION_ID = None
+CURRENT_PROXY_SESSION_LOCK = threading.Lock()
+
 
 def get_proxy_url(cfg=None):
     try:
@@ -49,7 +52,7 @@ def get_proxy_url(cfg=None):
         p_cfg = cfg.get("proxy") or {}
         if p_cfg.get("enabled") and p_cfg.get("url"):
             url = p_cfg.get("url").strip()
-            if "dataimpulse.com" in url and "__cr." not in url:
+            if "dataimpulse.com" in url:
                 try:
                     parts = urllib.parse.urlsplit(url)
                     if parts.netloc and "@" in parts.netloc:
@@ -58,6 +61,21 @@ def get_proxy_url(cfg=None):
                             u, p = user_pass.split(":", 1)
                             if "__cr." not in u:
                                 u = f"{u}__cr.in"
+                            if CURRENT_PROXY_SESSION_ID:
+                                u = re.sub(r"(__sid\.[^;:]+|;sid\.[^;:]+|__session\.[^;:]+)", "", u)
+                                u = f"{u}__sid.{CURRENT_PROXY_SESSION_ID}"
+                            new_netloc = f"{u}:{p}@{host_port}"
+                            url = urllib.parse.urlunsplit((parts.scheme, new_netloc, parts.path, parts.query, parts.fragment))
+                except Exception:
+                    pass
+            elif CURRENT_PROXY_SESSION_ID:
+                try:
+                    parts = urllib.parse.urlsplit(url)
+                    if parts.netloc and "@" in parts.netloc:
+                        user_pass, host_port = parts.netloc.split("@", 1)
+                        if ":" in user_pass:
+                            u, p = user_pass.split(":", 1)
+                            u = f"{u}-session-{CURRENT_PROXY_SESSION_ID}"
                             new_netloc = f"{u}:{p}@{host_port}"
                             url = urllib.parse.urlunsplit((parts.scheme, new_netloc, parts.path, parts.query, parts.fragment))
                 except Exception:
@@ -75,6 +93,45 @@ def get_opener(proxy_url=None):
     if proxy_url:
         handlers.append(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
     return urllib.request.build_opener(*handlers)
+
+
+def get_current_ip(proxy_url=None):
+    """Checks the public IP address routed through the active proxy."""
+    opener = get_opener(proxy_url)
+    endpoints = [
+        "https://api.ipify.org?format=json",
+        "http://ip-api.com/json",
+        "https://ifconfig.me/all.json",
+    ]
+    for ep in endpoints:
+        try:
+            req = urllib.request.Request(ep, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+            with opener.open(req, timeout=8.5) as resp:
+                raw = resp.read().decode("utf-8", "ignore")
+                return json.loads(raw)
+        except Exception:
+            continue
+    return {"ip": "unknown", "status": "failed"}
+
+
+def rotate_proxy_ip(cfg=None):
+    """
+    Forces immediate IP rotation on the configured proxy (e.g. DataImpulse or rotating residential proxy).
+    Updates session ID, closes pooled checker sessions, and queries new IP details.
+    Returns (ip, city, country).
+    """
+    global CURRENT_PROXY_SESSION_ID
+    with CURRENT_PROXY_SESSION_LOCK:
+        CURRENT_PROXY_SESSION_ID = uuid.uuid4().hex[:8]
+        reset_checker_session()
+
+    rotated_url = get_proxy_url(cfg)
+    ip_info = get_current_ip(rotated_url)
+    new_ip = ip_info.get("ip") or ip_info.get("query") or ip_info.get("ip_addr") or "unknown"
+    city = ip_info.get("city") or ip_info.get("region_name") or "India"
+    country = ip_info.get("country") or ip_info.get("country_code") or "IN"
+    log(f"🔄 Proxy IP rotated: {new_ip} ({city}, {country}) [session {CURRENT_PROXY_SESSION_ID}]")
+    return new_ip, city, country
 
 
 LOG_HOOK = None

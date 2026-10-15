@@ -697,6 +697,7 @@ def register_handlers(bot, cfg):
             "/proxy - check proxy status & live IP\n"
             "/proxy on|off - enable or disable proxy\n"
             "/setproxy <url> - configure new proxy URL\n"
+            "/rotateproxy - 🔄 change proxy IP to fresh residential IP\n"
             "/search <number/ID> - search account JSON\n"
             "/fresh - 🎁 download ZIP of all fresh unused accounts\n"
             "/old - ♻️ download ZIP of all old/recycled accounts\n"
@@ -1605,6 +1606,14 @@ def register_handlers(bot, cfg):
         city = ip_info.get("city") or ip_info.get("region_name") or "unknown"
         country = ip_info.get("country") or ip_info.get("country_code") or "unknown"
         bot.send_message(m.chat.id, f"✅ Proxy is LIVE!\n🌍 Routed IP: `{ip}`\n📍 Location: {city}, {country}", parse_mode="Markdown")
+
+    @bot.message_handler(commands=["rotateproxy", "newip"])
+    def cmd_rotateproxy(m):
+        if not is_authorized(m.chat.id, cfg, bot, m):
+            return
+        bot.reply_to(m, "🔄 Rotating proxy IP and resetting connections...", parse_mode="Markdown")
+        new_ip, city, country = ss.rotate_proxy_ip()
+        bot.send_message(m.chat.id, f"✅ *Proxy IP Rotated!*\n🌍 Routed IP: `{new_ip}`\n📍 Location: {city}, {country}\n✨ Ready for fresh checks!", parse_mode="Markdown")
 
     @bot.message_handler(commands=["precheck", "checkfresh"])
     def cmd_precheck(m):
