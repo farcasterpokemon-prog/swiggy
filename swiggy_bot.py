@@ -1601,6 +1601,9 @@ def register_handlers(bot, cfg):
 
         bot.reply_to(m, f"🔄 Proxy updated! Testing `{new_url[:30]}...`", parse_mode="Markdown")
         ip_info = api.get_current_ip(new_url)
+        ip = ip_info.get("ip") or ip_info.get("query") or ip_info.get("ip_addr") or "unknown"
+        city = ip_info.get("city") or ip_info.get("region_name") or "unknown"
+        country = ip_info.get("country") or ip_info.get("country_code") or "unknown"
         bot.send_message(m.chat.id, f"✅ Proxy is LIVE!\n🌍 Routed IP: `{ip}`\n📍 Location: {city}, {country}", parse_mode="Markdown")
 
     @bot.message_handler(commands=["precheck", "checkfresh"])

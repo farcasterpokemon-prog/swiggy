@@ -4,6 +4,7 @@ import gzip
 import json
 import os
 import queue
+import re
 import ssl
 import sys
 import threading
@@ -647,6 +648,7 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 continue
 
             tid0 = data.get("tid", "")
+            sid0 = data.get("sid", "")
             max_wait_sec = int(op.get("max_wait_sec", 120))
             ss.log("[%s] OTP requested successfully. Waiting up to %ds for SMS..." % (p, max_wait_sec))
 
@@ -683,7 +685,7 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 if is_registered:
                     slog("ℹ️ [%s] Swiggy verified account (Registered User). Finalizing & saving account to prevent wasting paid OTP..." % p)
                 else:
-                    ss.log("✨ [FRESH NUMBER CONFIRMED] %s is a BRAND NEW user (registered=False)! Finalizing signup..." % p)
+                    slog("✨ [FRESH NUMBER CONFIRMED] %s is a BRAND NEW user (registered=False)! Finalizing signup..." % p)
                 break
             else:
                 ss.log("⚠️ [%s] Swiggy rejected OTP (HTTP %d status=%s: '%s') -> Cancelling order %s in background & buying next..." % (p, code, status_code, status_msg or str(data)[:100], o))
