@@ -407,11 +407,16 @@ def create_accounts(chat_id, count, bot):
         "Submitting name",
         "SUCCESS: Account Created",
         "Swiggy rejected OTP",
+        "Timely Refund",
+        "Background Refund",
+        "ACCESS_CANCEL",
+        "queued for auto-refund",
+        "Refund",
     ]
     IGNORE_KEYWORDS = [
         "save_active_orders", "load_active_orders", "fetch_profile_customer_id",
         "Unregistered active rental", "registered_at", "verify_session_live notice",
-        "Background Refund", "Rent attempt", "Notice", "Ready:"
+        "Rent attempt", "Notice", "Ready:"
     ]
 
     def log_sender_thread():

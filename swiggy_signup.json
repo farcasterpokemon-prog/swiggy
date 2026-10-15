@@ -18,7 +18,7 @@
     "only_fresh": true,
     "otp_source": "provider",
     "otp": "",
-    "otp_timeout_sec": 50,
+    "otp_timeout_sec": 120,
     "clear_data_on_start": true,
     "rotate_identity": true,
     "rotate_via": "qute",
@@ -33,7 +33,7 @@
     "phone_code": "91",
     "base_url": "https://api.tiger-sms.com/stubs/handler_api.php",
     "poll_interval_sec": 1.0,
-    "max_wait_sec": 50,
+    "max_wait_sec": 120,
     "resend_after_sec": 999,
     "precheck_enabled": true,
     "workers": 50,
@@ -80,6 +80,7 @@
       "api_key": "B4YVsr7BRdS2JWk5okPdhbPYUFI8Qf8a",
       "service": "jx",
       "country": 22,
+      "max_wait_sec": 120,
       "base_url": "https://api.tiger-sms.com/stubs/handler_api.php"
     },
     "smshub": {

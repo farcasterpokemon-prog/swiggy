@@ -1258,7 +1258,55 @@ def cancel_all_active_numbers(provider=None):
     }
 
 
+REFUND_SUPERVISOR_RUNNING = False
+REFUND_SUPERVISOR_LOCK = threading.Lock()
+
+
+def start_refund_supervisor():
+    """Persistent background daemon that inspects active_orders and triggers refunds at exactly 2 minutes (121s)."""
+    global REFUND_SUPERVISOR_RUNNING
+    with REFUND_SUPERVISOR_LOCK:
+        if REFUND_SUPERVISOR_RUNNING:
+            return
+        REFUND_SUPERVISOR_RUNNING = True
+
+    def _supervisor_loop():
+        while True:
+            try:
+                orders = load_active_orders()
+                now = time.time()
+                for oid, oinfo in list(orders.items()):
+                    rent_time = float(oinfo.get("rent_time") or 0.0)
+                    elapsed = now - rent_time
+                    # Tiger SMS allows cancellation strictly after 2 minutes (120 seconds).
+                    # Check at >= 121 seconds to ensure server clock compatibility.
+                    if elapsed >= 121.0:
+                        ptype = oinfo.get("provider_type", "tiger")
+                        try:
+                            cfg = load_config(CONFIG_PATH)
+                            prov = make_provider(cfg.get("otp_presets", {}).get(ptype) or cfg.get("otp_provider"))
+                        except Exception:
+                            prov = None
+                        if prov and hasattr(prov, "set_status"):
+                            try:
+                                res = prov.set_status(oid, 8)
+                                res_str = str(res.get("_raw", "") if isinstance(res, dict) else res).strip()
+                                if "EARLY_CANCEL_DENIED" in res_str:
+                                    continue
+                                log(f"💰 [Timely Refund] Order {oid} (elapsed {int(elapsed)}s) -> {res_str or 'ACCESS_CANCEL'}")
+                                unregister_active_order(oid)
+                            except Exception as e:
+                                log(f"Refund supervisor notice for order {oid}: {e}")
+            except Exception:
+                pass
+            time.sleep(4.0)
+
+    t = threading.Thread(target=_supervisor_loop, daemon=True, name="RefundSupervisor")
+    t.start()
+
+
 def _cancel_worker(provider, order_id, rent_time):
+    start_refund_supervisor()
     for attempt in range(1, 4):
         try:
             if hasattr(provider, "set_status"):
@@ -1266,24 +1314,23 @@ def _cancel_worker(provider, order_id, rent_time):
                 res_str = str(res.get("_raw", "") if isinstance(res, dict) else res).strip()
                 if "EARLY_CANCEL_DENIED" in res_str:
                     elapsed = time.time() - rent_time
-                    wait_sec = max(2.0, 122.0 - elapsed)
+                    wait_sec = max(1.0, 121.0 - elapsed)
                     time.sleep(wait_sec)
-                    for sub_attempt in range(3):
+                    for sub_attempt in range(5):
                         res2 = provider.set_status(order_id, 8)
                         res2_str = str(res2.get("_raw", "") if isinstance(res2, dict) else res2).strip()
                         if "EARLY_CANCEL_DENIED" in res2_str:
-                            time.sleep(4)
+                            time.sleep(2)
                             continue
-                        log(f"[Background Refund] Order {order_id} -> {res2_str or 'ACCESS_CANCEL'}")
-                        break
-                    unregister_active_order(order_id)
+                        log(f"💰 [Timely Refund] Order {order_id} -> {res2_str or 'ACCESS_CANCEL'}")
+                        unregister_active_order(order_id)
+                        return
                     return
-                log(f"[Background Refund] Order {order_id} -> {res_str or 'ACCESS_CANCEL'}")
+                log(f"💰 [Timely Refund] Order {order_id} -> {res_str or 'ACCESS_CANCEL'}")
                 unregister_active_order(order_id)
                 return
         except Exception:
             time.sleep(3)
-    unregister_active_order(order_id)
 
 
 
@@ -1454,7 +1501,7 @@ def tap_center(adb, node):
 def get_otp(adb, provider, op, phone, order_id, s):
     source = s.get("otp_source", "device")
     if source == "provider" and provider:
-        max_wait = op.get("max_wait_sec", 50)
+        max_wait = op.get("max_wait_sec", 120)
         interval = op.get("poll_interval_sec", 1.2)
         resend_at = op.get("resend_after_sec", 999)
         log("waiting for OTP from provider (max %ds)" % max_wait)
@@ -1881,6 +1928,12 @@ def main():
                 acct = None
             wait_cancels()
             sys.exit(0 if acct else 1)
+
+
+try:
+    start_refund_supervisor()
+except Exception:
+    pass
 
 
 if __name__ == "__main__":
