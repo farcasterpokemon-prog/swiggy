@@ -606,17 +606,32 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
                 elif status_str == "not_registered":
                     slog("✨ [100%% Fresh Number Confirmed] %s is brand new!" % p)
                 else:
-                    time.sleep(0.5)
-                    try:
-                        registered, resp = ss.check_swiggy_registered(p, cfg)
-                        status_str = str(resp.get("status", "unknown")).lower().strip()
-                    except Exception:
-                        pass
-                    if not registered and status_str == "not_registered":
-                        slog("✨ [100%% Fresh Number Confirmed (on retry)] %s is brand new!" % p)
-                    else:
-                        slog("🚫 [Pre-Check Rejected] %s status is '%s' (not confirmed fresh). Cancelling order %s for 100%% refund & renting fresh..." % (p, status_str, o))
+                    resolved = False
+                    for retry_attempt in range(1, 3):
+                        slog("⏳ [Checker Busy] %s status is '%s'; refreshing connection (attempt %d/2)..." % (p, status_str, retry_attempt))
+                        time.sleep(1.2)
+                        ss.reset_checker_session()
+                        try:
+                            registered, resp = ss.check_swiggy_registered(p, cfg)
+                            status_str = str(resp.get("status", "unknown")).lower().strip()
+                        except Exception:
+                            pass
+                        if registered or status_str == "registered":
+                            slog("🚫 [Already Registered] %s was previously used on Swiggy. Cancelling order %s for 100%% refund..." % (p, o))
+                            ss.cancel_async(provider, o, rent_time=rent_time)
+                            resolved = True
+                            break
+                        elif status_str == "not_registered":
+                            slog("✨ [100%% Fresh Number Confirmed (on retry)] %s is brand new!" % p)
+                            resolved = True
+                            break
+
+                    if resolved and (registered or status_str == "registered"):
+                        continue
+                    if not resolved or status_str != "not_registered":
+                        slog("🚫 [Pre-Check Rejected] %s status is '%s'. Cancelling order %s for 100%% refund & pausing 3s..." % (p, status_str, o))
                         ss.cancel_async(provider, o, rent_time=rent_time)
+                        time.sleep(3.0)
                         continue
 
             if ss.is_cancelled():
@@ -943,17 +958,32 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
                 elif status_str == "not_registered":
                     slog("✨ [PRE-CHECK PASS] %s is UNREGISTERED (100%% Fresh) -> Queued for Instant OTP!" % p)
                 else:
-                    time.sleep(0.5)
-                    try:
-                        registered, resp = ss.check_swiggy_registered(p, cfg)
-                        status_str = str(resp.get("status", "unknown")).lower().strip()
-                    except Exception:
-                        pass
-                    if not registered and status_str == "not_registered":
-                        slog("✨ [PRE-CHECK PASS (on retry)] %s is UNREGISTERED -> Queued for Instant OTP!" % p)
-                    else:
-                        slog("🚫 [PRE-CHECK REJECT] %s status is '%s'. Cancelling order %s in background for refund" % (p, status_str, o))
+                    resolved = False
+                    for retry_attempt in range(1, 3):
+                        slog("⏳ [Checker Busy] %s status is '%s'; retrying (%d/2)..." % (p, status_str, retry_attempt))
+                        time.sleep(1.2)
+                        ss.reset_checker_session()
+                        try:
+                            registered, resp = ss.check_swiggy_registered(p, cfg)
+                            status_str = str(resp.get("status", "unknown")).lower().strip()
+                        except Exception:
+                            pass
+                        if registered or status_str == "registered":
+                            slog("🚫 [PRE-CHECK REJECT] %s is REGISTERED on Swiggy -> Cancelling order %s for refund" % (p, o))
+                            ss.cancel_async(provider, o, rent_time=rent_time)
+                            resolved = True
+                            break
+                        elif status_str == "not_registered":
+                            slog("✨ [PRE-CHECK PASS (on retry)] %s is UNREGISTERED -> Queued for Instant OTP!" % p)
+                            resolved = True
+                            break
+
+                    if resolved and (registered or status_str == "registered"):
+                        continue
+                    if not resolved or status_str != "not_registered":
+                        slog("🚫 [PRE-CHECK REJECT] %s status is '%s'. Cancelling order %s & pausing 3s..." % (p, status_str, o))
                         ss.cancel_async(provider, o, rent_time=rent_time)
+                        time.sleep(3.0)
                         continue
             else:
                 slog("✨ [PRE-CHECK SKIPPED] %s queued for Instant OTP!" % p)

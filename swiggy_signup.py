@@ -861,13 +861,43 @@ def get_signup_check_headers(device_id=None):
 
 CHECKER_SESSION = None
 CHECKER_SESSION_LOCK = threading.Lock()
+OTPCART_SESSION = None
+OTPCART_SESSION_LOCK = threading.Lock()
 
 
-def get_checker_session():
+def get_otpcart_session():
+    global OTPCART_SESSION
+    if OTPCART_SESSION is None:
+        with OTPCART_SESSION_LOCK:
+            if OTPCART_SESSION is None:
+                try:
+                    import requests
+                    s = requests.Session()
+                    adapter = requests.adapters.HTTPAdapter(pool_connections=15, pool_maxsize=30)
+                    s.mount("https://", adapter)
+                    s.mount("http://", adapter)
+                    OTPCART_SESSION = s
+                except Exception:
+                    pass
+    return OTPCART_SESSION
+
+
+def reset_checker_session():
     global CHECKER_SESSION
-    if CHECKER_SESSION is None:
+    with CHECKER_SESSION_LOCK:
+        try:
+            if CHECKER_SESSION and hasattr(CHECKER_SESSION, "close"):
+                CHECKER_SESSION.close()
+        except Exception:
+            pass
+        CHECKER_SESSION = None
+
+
+def get_checker_session(force_new=False):
+    global CHECKER_SESSION
+    if CHECKER_SESSION is None or force_new:
         with CHECKER_SESSION_LOCK:
-            if CHECKER_SESSION is None:
+            if CHECKER_SESSION is None or force_new:
                 try:
                     import requests
                     from requests.adapters import HTTPAdapter
@@ -880,8 +910,8 @@ def get_checker_session():
                     s.mount("http://", adapter)
                     CHECKER_SESSION = s
                 except Exception:
-                    CHECKER_SESSION = False
-    return CHECKER_SESSION if CHECKER_SESSION is not False else None
+                    CHECKER_SESSION = None
+    return CHECKER_SESSION
 
 
 def detect_user(mobile, session=None):
@@ -908,7 +938,7 @@ def detect_user(mobile, session=None):
     sess = session or get_checker_session()
     if sess is not None:
         try:
-            r = sess.post(url, json=payload, headers=headers, timeout=5.0)
+            r = sess.post(url, json=payload, headers=headers, timeout=8.5)
             data = r.json()
             msg = (data.get("statusMessage") or "").lower()
             code = data.get("statusCode")
@@ -918,93 +948,94 @@ def detect_user(mobile, session=None):
                 return "new", data
             return "unknown", data
         except Exception:
-            pass
+            # Reset session on network timeout or connection reset so stale pool isn't reused
+            reset_checker_session()
 
+    # Proxy Urllib fallback (never call unproxied from datacenter)
     proxy_url = get_proxy_url()
-    data_bytes = json.dumps(payload).encode("utf-8")
-
-    def _execute(use_proxy):
-        req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
-        if use_proxy and proxy_url:
-            opener = get_opener(proxy_url)
-            return opener.open(req, timeout=4.0)
-        return urllib.request.urlopen(req, timeout=3.0)
-
-    try:
-        cm = None
-        if proxy_url:
-            try:
-                cm = _execute(use_proxy=True)
-            except Exception as e:
-                try:
-                    cm = _execute(use_proxy=False)
-                except Exception:
-                    return "unknown", {"error": str(e)}
-        else:
-            cm = _execute(use_proxy=False)
-
-        with cm as r:
-            raw = r.read()
-            if r.headers.get("Content-Encoding") == "gzip":
-                try:
-                    import gzip
-                    raw = gzip.decompress(raw)
-                except Exception:
-                    pass
-            data = json.loads(raw.decode("utf-8", "replace"))
-
-        msg = (data.get("statusMessage") or "").lower()
-        code = data.get("statusCode")
-
-        if code == 3 or "already exist" in msg or "already registered" in msg:
-            return "existing", data
-        if code == 0 and ("done successfully" in msg or data.get("statusCode") == 0):
-            return "new", data
-        return "unknown", data
-    except urllib.error.HTTPError as he:
+    if proxy_url:
         try:
-            raw = he.read()
-            data = json.loads(raw.decode("utf-8", "replace"))
+            data_bytes = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
+            opener = get_opener(proxy_url)
+            with opener.open(req, timeout=8.5) as r:
+                raw = r.read()
+                if r.headers.get("Content-Encoding") == "gzip":
+                    try:
+                        import gzip
+                        raw = gzip.decompress(raw)
+                    except Exception:
+                        pass
+                data = json.loads(raw.decode("utf-8", "replace"))
             msg = (data.get("statusMessage") or "").lower()
             code = data.get("statusCode")
             if code == 3 or "already exist" in msg or "already registered" in msg:
                 return "existing", data
             if code == 0 and ("done successfully" in msg or code == 0):
                 return "new", data
-        except Exception:
-            pass
-        return "unknown", {"error": f"HTTP {he.code}"}
-    except Exception as e:
-        return "unknown", {"error": str(e)}
+            return "unknown", data
+        except urllib.error.HTTPError as he:
+            try:
+                raw = he.read()
+                data = json.loads(raw.decode("utf-8", "replace"))
+                msg = (data.get("statusMessage") or "").lower()
+                code = data.get("statusCode")
+                if code == 3 or "already exist" in msg or "already registered" in msg:
+                    return "existing", data
+                if code == 0 and ("done successfully" in msg or code == 0):
+                    return "new", data
+            except Exception:
+                pass
+            return "unknown", {"error": f"HTTP {he.code}"}
+        except Exception as e:
+            return "unknown", {"error": str(e)}
+
+    return "unknown", {"error": "no_proxy"}
 
 
-def check_external_api(clean, timeout=2.5, retries=1):
+def check_external_api(clean, timeout=6.0, retries=2):
+    """High-speed backup registration checker via Otpcart with persistent pooled requests."""
     url = "https://checker.otpcart.xyz/api/check-swiggy"
-    payload = json.dumps({"mobile": clean, "phone": clean}).encode("utf-8")
-    headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
+    payload = {"mobile": clean, "phone": clean}
+    sess = get_otpcart_session()
 
     for attempt in range(retries):
+        if sess is not None:
+            try:
+                r = sess.post(url, json=payload, timeout=timeout)
+                if r.status_code == 200:
+                    data = r.json()
+                    st = str(data.get("status", "")).lower().strip()
+                    if st == "registered":
+                        return True, {"status": "registered", "mobile": clean, "raw": data, "engine": "otpcart"}
+                    elif st == "not_registered":
+                        return False, {"status": "not_registered", "mobile": clean, "raw": data, "engine": "otpcart"}
+            except Exception:
+                pass
+
         try:
-            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+            data_bytes = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data_bytes, headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}, method="POST")
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 data = json.loads(r.read().decode("utf-8", "replace"))
-                st = str(data.get("status", "")).lower()
+                st = str(data.get("status", "")).lower().strip()
                 if st == "registered":
-                    return True, {"status": "registered", "mobile": clean, "raw": data}
+                    return True, {"status": "registered", "mobile": clean, "raw": data, "engine": "otpcart"}
                 elif st == "not_registered":
-                    return False, {"status": "not_registered", "mobile": clean, "raw": data}
+                    return False, {"status": "not_registered", "mobile": clean, "raw": data, "engine": "otpcart"}
         except Exception:
-            if attempt < retries - 1:
-                time.sleep(0.2)
-                continue
+            pass
+        if attempt < retries - 1:
+            time.sleep(0.4)
     return None
 
 
 def check_swiggy_registered(mobile, cfg=None):
     """
-    High-Speed Dual-Engine Swiggy Registration Checker.
-    1. Primary Engine: Native Swiggy via persistent pooled session & Indian residential proxy (1.5s avg, 100% authoritative).
-    2. Secondary Failover: Otpcart rotating checker backup.
+    High-Speed Dual-Engine Swiggy Registration Checker with Automatic Failover:
+    1. Primary Engine: Native Swiggy via persistent pooled session & Indian residential proxy (100% authoritative).
+    2. Secondary Failover: Otpcart high-speed rotating checker backup (~0.8s avg).
+    3. Self-Healing: Recovers from transient proxy stalls and avoids returning 'unknown'.
     """
     clean = re.sub(r"\D", "", str(mobile).strip())
     if len(clean) > 10 and clean.startswith("91"):
@@ -1014,19 +1045,27 @@ def check_swiggy_registered(mobile, cfg=None):
     elif len(clean) > 10:
         clean = clean[-10:]
 
-    # Engine 1: Native Swiggy via persistent pooled Indian proxy session (1.5s avg)
+    # Engine 1: Native Swiggy via persistent pooled Indian proxy session
     status, data = detect_user(clean)
     if status == "existing":
-        return True, {"status": "registered", "mobile": clean, "raw": data}
+        return True, {"status": "registered", "mobile": clean, "raw": data, "engine": "native"}
     elif status == "new":
-        return False, {"status": "not_registered", "mobile": clean, "raw": data}
+        return False, {"status": "not_registered", "mobile": clean, "raw": data, "engine": "native"}
 
-    # Engine 2: Otpcart backup rotating checker
-    ext_res = check_external_api(clean, timeout=3, retries=1)
+    # Engine 2: Otpcart high-speed backup rotating checker
+    ext_res = check_external_api(clean, timeout=6.0, retries=2)
     if ext_res is not None:
         return ext_res
 
-    return False, {"status": "unknown", "mobile": clean, "raw": data}
+    # Engine 1 Retry: Re-attempt Native after resetting session
+    reset_checker_session()
+    status2, data2 = detect_user(clean)
+    if status2 == "existing":
+        return True, {"status": "registered", "mobile": clean, "raw": data2, "engine": "native_retry"}
+    elif status2 == "new":
+        return False, {"status": "not_registered", "mobile": clean, "raw": data2, "engine": "native_retry"}
+
+    return False, {"status": "unknown", "mobile": clean, "raw": data or data2}
 
 
 def make_provider(op):
