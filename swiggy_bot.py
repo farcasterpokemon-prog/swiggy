@@ -379,7 +379,7 @@ def create_accounts(chat_id, count, bot):
     log_queue = queue.Queue(maxsize=100)
     stop_logger = threading.Event()
 
-    # Log filter: only stream number buy, check status, and insufficient funds milestones to Telegram
+    # Log filter: stream live milestone events (number hunting, checking, OTP request, countdown, OTP received, finalize)
     MILESTONE_KEYWORDS = [
         "Bought number",
         "Checking",
@@ -397,13 +397,21 @@ def create_accounts(chat_id, count, bot):
         "INSUFFICIENT FUNDS",
         "Balance Recharged",
         "Auto-switching",
+        "Requesting Swiggy OTP",
+        "OTP requested successfully",
+        "Waiting for OTP",
+        "OTP RECEIVED",
+        "OTP timeout",
+        "Finalizing signup",
+        "finalizing account",
+        "Submitting name",
+        "SUCCESS: Account Created",
+        "Swiggy rejected OTP",
     ]
     IGNORE_KEYWORDS = [
         "save_active_orders", "load_active_orders", "fetch_profile_customer_id",
         "Unregistered active rental", "registered_at", "verify_session_live notice",
-        "Requesting Swiggy OTP", "Waiting", "OTP requested", "OTP RECEIVED", "OTP timeout",
-        "verify response", "proceeding to finalize", "Submitting name", "Swiggy rejected OTP",
-        "sms_otp failed", "sms_otp error", "Rent attempt", "Notice", "Ready:"
+        "Background Refund", "Rent attempt", "Notice", "Ready:"
     ]
 
     def log_sender_thread():
@@ -532,7 +540,7 @@ def create_accounts(chat_id, count, bot):
 
     try:
         cfg_workers = cfg.get("workers") or (op.get("workers") if isinstance(op, dict) else 25) or 25
-        max_workers = min(count, int(cfg_workers))
+        max_workers = min(max(count, 3), int(cfg_workers))
         safe_send_message(
             bot,
             chat_id,
@@ -564,8 +572,8 @@ def create_accounts(chat_id, count, bot):
                         # Send verified account JSON directly to chat
                         send_account_json(chat_id, acct, bot)
 
-                    # Dynamic refill: only spawn if remaining needed accounts > len(futs)
-                    if (len(newly_created_accounts) + len(futs) < count) and not (ss.is_cancelled() or RUNNING["cancel"]):
+                    # Dynamic refill: keep worker pool saturated until count is reached
+                    if (len(newly_created_accounts) < count) and (len(futs) < max_workers) and not (ss.is_cancelled() or RUNNING["cancel"]):
                         if getattr(api, "INSUFFICIENT_PAUSE_UNTIL", 0) > time.time():
                             time.sleep(1.0)
                         else:

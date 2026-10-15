@@ -131,12 +131,32 @@ def _read(resp):
 
 
 def call(method, path, body=None, headers=None, timeout=30, proxy_url=None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(BASE + path, data=data, headers=headers or {}, method=method)
-    p_url = proxy_url if proxy_url is not None else get_proxy_url()
+    url = BASE + path
     now = time.time()
+    waf_cooldown = getattr(ss, "PROXY_WAF_COOLDOWN_UNTIL", 0.0)
+
+    # Fast path: Use persistent connection-pooled session with Indian proxy
+    if proxy_url is None and now >= waf_cooldown:
+        sess = ss.get_checker_session()
+        if sess is not None:
+            try:
+                data_bytes = json.dumps(body).encode("utf-8") if body is not None else None
+                h = dict(headers or {})
+                if body is not None and "Content-Type" not in h and "content-type" not in h:
+                    h["Content-Type"] = "application/json; charset=utf-8"
+                resp = sess.request(method.upper(), url, data=data_bytes, headers=h, timeout=timeout)
+                if resp.status_code in (403, 429, 502, 503, 504):
+                    if hasattr(ss, "PROXY_WAF_COOLDOWN_LOCK"):
+                        with ss.PROXY_WAF_COOLDOWN_LOCK:
+                            ss.PROXY_WAF_COOLDOWN_UNTIL = time.time() + 60.0
+                return resp.status_code, resp.content
+            except Exception:
+                pass
+
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+    p_url = proxy_url if proxy_url is not None else get_proxy_url()
     try:
-        waf_cooldown = getattr(ss, "PROXY_WAF_COOLDOWN_UNTIL", 0.0)
         if p_url and now >= waf_cooldown:
             try:
                 opener = get_opener(p_url)
