@@ -1554,20 +1554,42 @@ def load_accounts():
     if os.path.exists(ACCOUNTS_PATH):
         try:
             with open(ACCOUNTS_PATH, "r", encoding="utf-8") as fh:
-                return json.load(fh)
+                raw_accs = json.load(fh)
+            valid_accs = []
+            for a in raw_accs:
+                if not isinstance(a, dict):
+                    continue
+                cid = str(a.get("customerId", "")).strip()
+                tok = str(a.get("token", "")).strip()
+                if cid and cid not in ["0", "?", "None", "null"] and not tok.startswith("jwt_swiggy_"):
+                    valid_accs.append(a)
+            return valid_accs
         except Exception:
             pass
     return []
 
 
 def save_account(entry):
+    if not entry or not isinstance(entry, dict):
+        return False
+    cid = str(entry.get("customerId", "")).strip()
+    if not cid or cid in ["0", "?", "None", "null"]:
+        log("⚠️ Refusing to save invalid account %s: missing or empty customerId" % entry.get("mobile"))
+        return False
+    token = str(entry.get("token", "")).strip()
+    if token.startswith("jwt_swiggy_"):
+        log("⚠️ Refusing to save invalid account %s: dummy unverified token" % entry.get("mobile"))
+        return False
+
     with SAVE_LOCK:
         accs = load_accounts()
+        accs = [a for a in accs if str(a.get("mobile")) != str(entry.get("mobile")) and str(a.get("customerId")) != cid]
         accs.append(entry)
         with open(ACCOUNTS_PATH, "w", encoding="utf-8") as fh:
             json.dump(accs, fh, indent=2)
     log("account saved to %s" % ACCOUNTS_PATH)
     save_account_zip(entry)
+    return True
 
 
 def save_account_zip(entry):

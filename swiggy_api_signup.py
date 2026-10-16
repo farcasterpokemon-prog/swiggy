@@ -94,11 +94,9 @@ def _read(resp):
 
 def call(method, path, body=None, headers=None, timeout=30, proxy_url=None):
     url = BASE + path
-    now = time.time()
-    waf_cooldown = getattr(ss, "PROXY_WAF_COOLDOWN_UNTIL", 0.0)
 
-    # Fast path: Use persistent connection-pooled session with Indian proxy
-    if proxy_url is None and now >= waf_cooldown:
+    # Attempt 1: via persistent requests.Session with active proxy
+    for attempt in range(2):
         sess = ss.get_checker_session()
         if sess is not None:
             try:
@@ -107,45 +105,33 @@ def call(method, path, body=None, headers=None, timeout=30, proxy_url=None):
                 if body is not None and "Content-Type" not in h and "content-type" not in h:
                     h["Content-Type"] = "application/json; charset=utf-8"
                 resp = sess.request(method.upper(), url, data=data_bytes, headers=h, timeout=timeout)
-                if resp.status_code in (403, 429, 502, 503, 504):
-                    if hasattr(ss, "PROXY_WAF_COOLDOWN_LOCK"):
-                        with ss.PROXY_WAF_COOLDOWN_LOCK:
-                            ss.PROXY_WAF_COOLDOWN_UNTIL = time.time() + 60.0
+                # If rate-limited or blocked, rotate proxy IP once and retry
+                if resp.status_code in (403, 429) and attempt == 0:
+                    ss.rotate_proxy_ip()
+                    time.sleep(1.0)
+                    continue
                 return resp.status_code, resp.content
             except Exception:
-                pass
+                if attempt == 0:
+                    ss.rotate_proxy_ip()
+                    time.sleep(0.5)
+                    continue
 
+    # Attempt 2: via urllib with explicit proxy opener (never unproxied)
+    p_url = proxy_url if proxy_url is not None else get_proxy_url()
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
-    p_url = proxy_url if proxy_url is not None else get_proxy_url()
-    try:
-        if p_url and now >= waf_cooldown:
-            try:
-                opener = get_opener(p_url)
-                cm = opener.open(req, timeout=timeout)
-                with cm as resp:
-                    return resp.status, _read(resp)
-            except urllib.error.HTTPError as he:
-                if he.code in (403, 429, 502, 503, 504):
-                    if hasattr(ss, "PROXY_WAF_COOLDOWN_LOCK"):
-                        with ss.PROXY_WAF_COOLDOWN_LOCK:
-                            ss.PROXY_WAF_COOLDOWN_UNTIL = time.time() + 60.0
-                    cm = urllib.request.urlopen(req, timeout=timeout)
-                    with cm as resp:
-                        return resp.status, _read(resp)
-                return he.code, _read(he)
-            except Exception:
-                cm = urllib.request.urlopen(req, timeout=timeout)
-                with cm as resp:
-                    return resp.status, _read(resp)
-        else:
-            cm = urllib.request.urlopen(req, timeout=timeout)
-            with cm as resp:
+    if p_url:
+        try:
+            opener = get_opener(p_url)
+            with opener.open(req, timeout=timeout) as resp:
                 return resp.status, _read(resp)
-    except urllib.error.HTTPError as e:
-        return e.code, _read(e)
-    except Exception as e:
-        return 0, str(e).encode()
+        except urllib.error.HTTPError as he:
+            return he.code, _read(he)
+        except Exception as e:
+            return 0, str(e).encode()
+
+    return 0, b'{"error": "no_proxy_configured"}'
 
 
 def base_headers(swuid=None, tid="", sid=""):
@@ -303,6 +289,7 @@ def fetch_profile_customer_id(tid: str, sid: str, swuid: str = "") -> str:
     try:
         h = base_headers(swuid, tid=tid, sid=sid)
         endpoints = [
+            "/api/v4/user/profile?silentSession=true&optionalKeys=IS_SUPER,SUPER_DETAILS,SWIGGY_PAY",
             "/api/v3/app/profile",
             "/api/v2/app/user/profile",
             "/api/v1/user/profile",
@@ -708,8 +695,91 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
         sid = data.get("sid") or (data.get("data") or {}).get("sid") or sid
         verify_data = data
 
-    # Step 2: Finalize signup or login session
-    # Mark provider activation done (Status 6 = Completed)
+    final_data = verify_data
+    if not is_registered:
+        ss.log("[%s] Submitting name '%s' for brand new account signup..." % (phone, name))
+        signup_ok = False
+        for s_attempt in range(1, 3):
+            try:
+                code, reg_data = signup(phone, name, tid, sid, swuid)
+                status_code = reg_data.get("statusCode")
+                msg = reg_data.get("statusMessage") or reg_data.get("_raw", "")[:120]
+                ss.log("[%s] signup attempt %d -> HTTP %d status=%s msg='%s'" % (phone, s_attempt, code, status_code, msg))
+                if code in (200, 201) and status_code in (0, "0"):
+                    final_data = reg_data
+                    tid = str(reg_data.get("tid") or (reg_data.get("data") or {}).get("tid") or tid)
+                    sid = str(reg_data.get("sid") or (reg_data.get("data") or {}).get("sid") or sid)
+                    signup_ok = True
+                    break
+                else:
+                    ss.log("[%s] signup attempt %d rejected (%s). Rotating proxy & retrying..." % (phone, s_attempt, msg))
+                    ss.rotate_proxy_ip(cfg)
+                    time.sleep(1.0)
+            except Exception as e:
+                ss.log("[%s] signup attempt %d error: %s" % (phone, s_attempt, e))
+                ss.rotate_proxy_ip(cfg)
+                time.sleep(1.0)
+
+        if not signup_ok:
+            slog("❌ [%s] Swiggy brand-new user signup failed. Refusing to create invalid account without customerId." % phone)
+            if order_id and provider:
+                ss.cancel_async(provider, order_id, rent_time=rent_time)
+            return None
+
+    # Step 2: Extract account credentials
+    account = extract_account_dict(final_data, phone, tid, sid, swuid, name=name)
+    account["is_new_user"] = not is_registered
+    account["account_type"] = "OLD" if is_registered else "FRESH"
+
+    # Multi-layered customerId extraction & validation
+    cust_id = str(account.get("customerId", "")).strip()
+    if not cust_id or cust_id in ["0", "?", "None", "null"]:
+        cust_id = extract_customer_id_from_any(final_data, tid=tid)
+    if not cust_id or cust_id in ["0", "?", "None", "null"]:
+        cust_id = fetch_profile_customer_id(tid, sid, swuid)
+    account["customerId"] = cust_id
+
+    # Token extraction & validation (never use fake dummy tokens)
+    real_token = (
+        (final_data.get("data") or {}).get("token")
+        or (verify_data.get("data") or {}).get("token")
+        or (final_data.get("data") or {}).get("accessToken")
+        or account.get("token")
+    )
+    if not real_token or str(real_token).startswith("jwt_swiggy_"):
+        if tid and len(tid) > 30 and "." in tid:
+            real_token = tid
+        else:
+            real_token = ""
+    account["token"] = real_token
+
+    # Verify session is 100% active on Swiggy Profile API
+    verified_ok = False
+    try:
+        is_live, enriched_account = verify_session_live(account)
+        if is_live and enriched_account:
+            account = enriched_account
+            verified_ok = True
+        else:
+            ss.rotate_proxy_ip(cfg)
+            is_live, enriched_account = verify_session_live(account)
+            if is_live and enriched_account:
+                account = enriched_account
+                verified_ok = True
+    except Exception as e:
+        slog("verify_session_live error: %s" % e)
+
+    # FINAL QUALITY GATE: Reject any account lacking valid customerId, token, or live session
+    final_cid = str(account.get("customerId", "")).strip()
+    if not final_cid or final_cid in ["0", "?", "None", "null"] or not account.get("token") or not verified_ok:
+        slog("❌ [%s] Account rejected by quality gate: customerId='%s', token='%s', is_live=%s. Refusing to deliver invalid login." % (
+            phone, final_cid, "VALID" if account.get("token") else "EMPTY", verified_ok
+        ))
+        if order_id and provider:
+            ss.cancel_async(provider, order_id, rent_time=rent_time)
+        return None
+
+    # Mark provider activation complete (Status 6) ONLY AFTER verification passes
     if order_id and provider and hasattr(provider, "set_status"):
         try:
             provider.set_status(order_id, 6)
@@ -718,38 +788,14 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
             ss.log("provider completion notice: %s" % e)
         ss.unregister_active_order(order_id)
 
-    final_data = verify_data
-    if not is_registered:
-        ss.log("[%s] Submitting name '%s' for brand new account signup..." % (phone, name))
-        try:
-            code, reg_data = signup(phone, name, tid, sid, swuid)
-            msg = reg_data.get("statusMessage") or reg_data.get("_raw", "")[:120]
-            ss.log("signup response -> HTTP %d status=%s msg=%s" % (code, reg_data.get("statusCode"), msg))
-            if code == 200 and reg_data.get("statusCode") == 0:
-                final_data = reg_data
-        except Exception as e:
-            ss.log("signup call error: %s" % e)
+    saved = ss.save_account(account)
+    if not saved:
+        slog("❌ [%s] Failed to save account to database." % phone)
+        return None
 
-    account = extract_account_dict(final_data, phone, tid, sid, swuid, name=name)
-    account["is_new_user"] = not is_registered
-
-    if not account.get("token"):
-        account["token"] = (final_data.get("data") or {}).get("token") or (verify_data.get("data") or {}).get("token") or f"jwt_swiggy_{int(time.time())}_{uuid.uuid4().hex[:12]}"
-
-    # Double check customerId
-    if not account.get("customerId"):
-        account["customerId"] = extract_customer_id_from_any(account) or extract_customer_id_from_any(final_data, tid=account.get("tid", "")) or fetch_profile_customer_id(account.get("tid", ""), account.get("sid", ""), account.get("deviceId", ""))
-
-    # Enrich with live profile if available
-    try:
-        is_live, enriched_account = verify_session_live(account)
-        if is_live and enriched_account:
-            account = enriched_account
-    except Exception as e:
-        slog("profile enrichment note: %s" % e)
-
-    ss.save_account(account)
-    slog("🎉 SUCCESS: Account Created & Verified: %s (customerId: %s)" % (account["mobile"], account["customerId"]))
+    slog("🎉 SUCCESS: Account Created & Verified [%s]: %s (customerId: %s)" % (
+        account.get("account_type", "FRESH"), account["mobile"], account["customerId"]
+    ))
     return account
 
 
@@ -829,7 +875,82 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
             else:
                 slog("✨ [FRESH NUMBER CONFIRMED] %s is a BRAND NEW user (registered=False)! Finalizing signup..." % p)
 
-            # Mark provider completed
+            # Signup if fresh
+            final_data = data
+            name = ss.random_name() if cfg.get("signup", {}).get("auto_random", True) else (cfg.get("signup", {}).get("name") or "Swiggy User")
+            if not is_registered:
+                slog("[%s] Submitting name '%s' for fresh account signup..." % (p, name))
+                signup_ok = False
+                for s_attempt in range(1, 3):
+                    try:
+                        code_s, reg_data = signup(p, name, tid1, sid1, sw)
+                        status_code_s = reg_data.get("statusCode")
+                        if code_s in (200, 201) and status_code_s in (0, "0"):
+                            final_data = reg_data
+                            tid1 = str(reg_data.get("tid") or (reg_data.get("data") or {}).get("tid") or tid1)
+                            sid1 = str(reg_data.get("sid") or (reg_data.get("data") or {}).get("sid") or sid1)
+                            signup_ok = True
+                            break
+                        else:
+                            ss.rotate_proxy_ip(cfg)
+                            time.sleep(1.0)
+                    except Exception as e:
+                        ss.rotate_proxy_ip(cfg)
+                        time.sleep(1.0)
+
+                if not signup_ok:
+                    slog("❌ [%s] Fresh user signup failed. Refusing to create invalid account." % p)
+                    ss.cancel_async(provider, o, rent_time=rent_time)
+                    return
+
+            acct = extract_account_dict(final_data, p, tid1, sid1, sw, name=name)
+            acct["is_new_user"] = not is_registered
+            acct["account_type"] = "OLD" if is_registered else "FRESH"
+
+            cust_id = str(acct.get("customerId", "")).strip()
+            if not cust_id or cust_id in ["0", "?", "None", "null"]:
+                cust_id = extract_customer_id_from_any(final_data, tid=tid1)
+            if not cust_id or cust_id in ["0", "?", "None", "null"]:
+                cust_id = fetch_profile_customer_id(tid1, sid1, sw)
+            acct["customerId"] = cust_id
+
+            real_token = (
+                (final_data.get("data") or {}).get("token")
+                or (data.get("data") or {}).get("token")
+                or (final_data.get("data") or {}).get("accessToken")
+                or acct.get("token")
+            )
+            if not real_token or str(real_token).startswith("jwt_swiggy_"):
+                if tid1 and len(tid1) > 30 and "." in tid1:
+                    real_token = tid1
+                else:
+                    real_token = ""
+            acct["token"] = real_token
+
+            verified_ok = False
+            try:
+                ok_live, live_acct = verify_session_live(acct)
+                if ok_live and live_acct:
+                    acct = live_acct
+                    verified_ok = True
+                else:
+                    ss.rotate_proxy_ip(cfg)
+                    ok_live, live_acct = verify_session_live(acct)
+                    if ok_live and live_acct:
+                        acct = live_acct
+                        verified_ok = True
+            except Exception as e:
+                slog("live verify notice: %s" % e)
+
+            final_cid = str(acct.get("customerId", "")).strip()
+            if not final_cid or final_cid in ["0", "?", "None", "null"] or not acct.get("token") or not verified_ok:
+                slog("❌ [%s] Account rejected by quality gate: customerId='%s', token='%s', is_live=%s. Refusing to deliver invalid login." % (
+                    p, final_cid, "VALID" if acct.get("token") else "EMPTY", verified_ok
+                ))
+                ss.cancel_async(provider, o, rent_time=rent_time)
+                return
+
+            # Mark provider completed ONLY AFTER verification passes
             if hasattr(provider, "set_status"):
                 try:
                     provider.set_status(o, 6)
@@ -838,34 +959,10 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
                     slog("provider completion notice: %s" % e)
             ss.unregister_active_order(o)
 
-            # Signup if fresh
-            final_data = data
-            name = ss.random_name() if cfg.get("signup", {}).get("auto_random", True) else (cfg.get("signup", {}).get("name") or "Swiggy User")
-            if not is_registered:
-                slog("[%s] Submitting name '%s' for fresh account signup..." % (p, name))
-                try:
-                    code_s, reg_data = signup(p, name, tid1, sid1, sw)
-                    if code_s == 200 and reg_data.get("statusCode") in [0, "0"]:
-                        final_data = reg_data
-                except Exception as e:
-                    slog("signup error: %s" % e)
+            saved = ss.save_account(acct)
+            if not saved:
+                return
 
-            acct = extract_account_dict(final_data, p, tid1, sid1, sw, name=name)
-            acct["is_new_user"] = not is_registered
-            acct["account_type"] = "OLD" if is_registered else "FRESH"
-            if not acct.get("token"):
-                acct["token"] = (final_data.get("data") or {}).get("token") or (data.get("data") or {}).get("token") or f"jwt_swiggy_{int(time.time())}_{uuid.uuid4().hex[:12]}"
-            if not acct.get("customerId"):
-                acct["customerId"] = extract_customer_id_from_any(acct) or extract_customer_id_from_any(final_data, tid=acct.get("tid", "")) or fetch_profile_customer_id(acct.get("tid", ""), acct.get("sid", ""), acct.get("deviceId", ""))
-
-            try:
-                ok_live, live_acct = verify_session_live(acct)
-                if ok_live and live_acct:
-                    acct = live_acct
-            except Exception as e:
-                slog("live verify notice: %s" % e)
-
-            ss.save_account(acct)
             slog("🎉 SUCCESS: Account Created & Verified [%s]: %s (customerId: %s)" % (acct.get("account_type", "FRESH"), acct["mobile"], acct["customerId"]))
 
             with created_lock:

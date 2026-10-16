@@ -570,6 +570,13 @@ def create_accounts(chat_id, count, bot):
                         acct = None
 
                     if acct:
+                        cid = str(acct.get("customerId") or "").strip()
+                        tok = str(acct.get("token") or "").strip()
+                        if not cid or cid in ("0", "None", "null") or tok.startswith("jwt_swiggy_"):
+                            log(f"⚠️ [GATEKEEPER] Worker returned invalid account without customerId or with dummy token: {acct.get('mobile')} - discarding.")
+                            acct = None
+
+                    if acct:
                         acct = ensure_account_fields(acct)
                         created += 1
                         newly_created_accounts.append(acct)
