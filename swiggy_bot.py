@@ -544,8 +544,8 @@ def create_accounts(chat_id, count, bot):
                 return
 
     try:
-        cfg_workers = cfg.get("workers") or (op.get("workers") if isinstance(op, dict) else 25) or 25
-        max_workers = min(max(count, 3), int(cfg_workers))
+        cfg_workers = cfg.get("workers") or (op.get("workers") if isinstance(op, dict) else 10) or 10
+        max_workers = min(max(count, 1), int(cfg_workers))
         safe_send_message(
             bot,
             chat_id,
@@ -1289,13 +1289,13 @@ def register_handlers(bot, cfg):
             return
         parts = (m.text or "").split(maxsplit=1)
         cfg_data = ss.load_config(ss.CONFIG_PATH)
-        cur_w = cfg_data.get("workers") or (cfg_data.get("otp_provider") or {}).get("workers", 50)
+        cur_w = cfg_data.get("workers") or (cfg_data.get("otp_provider") or {}).get("workers", 10)
         if len(parts) < 2:
             safe_reply(
                 bot,
                 m,
                 f"⚡ *Current Concurrency:* `{cur_w}` parallel workers\n\n"
-                f"Usage: `/workers <1-100>` (e.g. `/workers 50` or `/workers 100`)",
+                f"Usage: `/workers <1-100>` (e.g. `/workers 10`)",
                 parse_mode="Markdown",
             )
             return

@@ -821,9 +821,9 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
     poll_interval = float(op.get("poll_interval_sec", 1.2))
     resend_after_sec = float(op.get("resend_after_sec", 999))
 
-    cfg_workers = cfg.get("workers") or op.get("workers") or 50
-    total_workers = min(max(int(cfg_workers), 10), 100)
-    hunter_concurrency = min(total_workers, max(count * 2, 3), 15)
+    cfg_workers = cfg.get("workers") or op.get("workers") or 10
+    total_workers = min(max(int(cfg_workers), 1), 100)
+    hunter_concurrency = min(total_workers, max(count, 1), 10)
 
     stop_event = threading.Event()
     fresh_queue = queue.Queue(maxsize=100)
