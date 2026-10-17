@@ -51,6 +51,48 @@ def slog(msg):
         notify(msg)
 
 
+PAID_FAILURES_LOCK = threading.Lock()
+CONSECUTIVE_PAID_FAILURES = 0
+CIRCUIT_BREAKER_TRIGGERED = False
+
+
+def get_circuit_breaker_status():
+    with PAID_FAILURES_LOCK:
+        return CIRCUIT_BREAKER_TRIGGERED, CONSECUTIVE_PAID_FAILURES
+
+
+def reset_circuit_breaker():
+    global CONSECUTIVE_PAID_FAILURES, CIRCUIT_BREAKER_TRIGGERED
+    with PAID_FAILURES_LOCK:
+        CONSECUTIVE_PAID_FAILURES = 0
+        CIRCUIT_BREAKER_TRIGGERED = False
+
+
+def record_paid_success(phone=""):
+    global CONSECUTIVE_PAID_FAILURES
+    with PAID_FAILURES_LOCK:
+        if CONSECUTIVE_PAID_FAILURES > 0:
+            slog(f"✅ [CIRCUIT BREAKER RESET] Account created successfully for {phone}! Failure counter reset from {CONSECUTIVE_PAID_FAILURES} to 0.")
+        CONSECUTIVE_PAID_FAILURES = 0
+
+
+def record_paid_failure(phone, reason, cfg=None):
+    global CONSECUTIVE_PAID_FAILURES, CIRCUIT_BREAKER_TRIGGERED
+    threshold = 4
+    if cfg and isinstance(cfg, dict):
+        threshold = int((cfg.get("signup") or {}).get("max_consecutive_paid_failures", 4))
+    with PAID_FAILURES_LOCK:
+        CONSECUTIVE_PAID_FAILURES += 1
+        curr = CONSECUTIVE_PAID_FAILURES
+        slog(f"⚠️ [CIRCUIT BREAKER] Paid OTP failure #{curr}/{threshold} on {phone}: {reason}")
+        if curr >= threshold:
+            CIRCUIT_BREAKER_TRIGGERED = True
+            slog(f"🚨 [CIRCUIT BREAKER TRIGGERED] {curr} consecutive accounts failed after paid OTP ($0.{curr * 10:02d} deducted). Stopping run immediately to protect balance!")
+            ss.trigger_cancel()
+            return True
+        return False
+
+
 BASE = "https://profile.swiggy.com"
 CTX = ssl.create_default_context()
 CTX.check_hostname = False
@@ -653,6 +695,7 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
             else:
                 ss.log("⚠️ [%s] Swiggy rejected OTP (HTTP %d status=%s: '%s') -> Cancelling order %s in background & buying next..." % (p, code, status_code, status_msg or str(data)[:100], o))
                 ss.cancel_async(provider, o, rent_time=rent_time)
+                record_paid_failure(p, f"Swiggy rejected OTP (HTTP {code} status={status_code})", cfg)
                 continue
 
         if phone is None or ss.is_cancelled():
@@ -724,6 +767,7 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
             slog("❌ [%s] Swiggy brand-new user signup failed. Refusing to create invalid account without customerId." % phone)
             if order_id and provider:
                 ss.cancel_async(provider, order_id, rent_time=rent_time)
+            record_paid_failure(phone, "Swiggy brand-new user signup failed", cfg)
             return None
 
     # Step 2: Extract account credentials
@@ -777,6 +821,7 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
         ))
         if order_id and provider:
             ss.cancel_async(provider, order_id, rent_time=rent_time)
+        record_paid_failure(phone, f"Quality gate rejected (customerId='{final_cid}', verified={verified_ok})", cfg)
         return None
 
     # Mark provider activation complete (Status 6) ONLY AFTER verification passes
@@ -791,11 +836,13 @@ def create_api_account(cfg, phone=None, order_id=None, name=None):
     saved = ss.save_account(account)
     if not saved:
         slog("❌ [%s] Failed to save account to database." % phone)
+        record_paid_failure(phone, "Database save failed", cfg)
         return None
 
     slog("🎉 SUCCESS: Account Created & Verified [%s]: %s (customerId: %s)" % (
         account.get("account_type", "FRESH"), account["mobile"], account["customerId"]
     ))
+    record_paid_success(phone)
     return account
 
 
@@ -901,6 +948,7 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
                 if not signup_ok:
                     slog("❌ [%s] Fresh user signup failed. Refusing to create invalid account." % p)
                     ss.cancel_async(provider, o, rent_time=rent_time)
+                    record_paid_failure(p, "Fresh user signup failed", cfg)
                     return
 
             acct = extract_account_dict(final_data, p, tid1, sid1, sw, name=name)
@@ -948,6 +996,7 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
                     p, final_cid, "VALID" if acct.get("token") else "EMPTY", verified_ok
                 ))
                 ss.cancel_async(provider, o, rent_time=rent_time)
+                record_paid_failure(p, f"Quality gate rejected (customerId='{final_cid}', verified={verified_ok})", cfg)
                 return
 
             # Mark provider completed ONLY AFTER verification passes
@@ -961,9 +1010,11 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
 
             saved = ss.save_account(acct)
             if not saved:
+                record_paid_failure(p, "Database save failed", cfg)
                 return
 
             slog("🎉 SUCCESS: Account Created & Verified [%s]: %s (customerId: %s)" % (acct.get("account_type", "FRESH"), acct["mobile"], acct["customerId"]))
+            record_paid_success(acct.get("mobile", p))
 
             with created_lock:
                 created_accounts.append(acct)
@@ -978,6 +1029,7 @@ def create_pipeline_batch(count: int, cfg: dict, on_account_created=None, is_can
         else:
             slog("⚠️ [%s] Swiggy rejected OTP (HTTP %d status=%s: '%s') -> Cancelling order in background..." % (p, code, status_code, status_msg or str(data)[:100]))
             ss.cancel_async(provider, o, rent_time=rent_time)
+            record_paid_failure(p, f"Swiggy rejected OTP (HTTP {code} status={status_code})", cfg)
 
     # 1. Hunter Worker (Stage 1)
     def hunter_worker():
