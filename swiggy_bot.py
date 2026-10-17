@@ -412,6 +412,9 @@ def create_accounts(chat_id, count, bot):
         "ACCESS_CANCEL",
         "queued for auto-refund",
         "Refund",
+        "CIRCUIT BREAKER",
+        "SAFETY SHIELD",
+        "Paid OTP failure",
     ]
     IGNORE_KEYWORDS = [
         "save_active_orders", "load_active_orders", "fetch_profile_customer_id",
@@ -458,6 +461,8 @@ def create_accounts(chat_id, count, bot):
 
     api.LOG_HOOK = chat_logger
     ss.LOG_HOOK = chat_logger
+    if hasattr(api, "reset_circuit_breaker"):
+        api.reset_circuit_breaker()
 
     created = 0
     newly_created_accounts = []
@@ -619,6 +624,20 @@ def create_accounts(chat_id, count, bot):
         )
 
         # 3. Final summary message
+        cb_triggered = False
+        cb_fails = 0
+        if hasattr(api, "get_circuit_breaker_status"):
+            cb_triggered, cb_fails = api.get_circuit_breaker_status()
+
+        if cb_triggered:
+            cb_alert = (
+                f"🚨 *SAFETY SHIELD TRIGGERED (RUN AUTO-STOPPED)*\n\n"
+                f"• *Reason:* `{cb_fails}` consecutive accounts failed after paid OTP delivery.\n"
+                f"• *Protection:* All workers stopped immediately & pending rentals refunded to protect your balance.\n"
+                f"• *Accounts Saved Before Stop:* `{len(newly_created_accounts)}`"
+            )
+            safe_send_message(bot, chat_id, cb_alert, parse_mode="Markdown")
+
         summary_msg = (
             f"🎉 *Account Creation Complete!*\n\n"
             f"• *Total Delivered:* `{len(newly_created_accounts)}`\n"
