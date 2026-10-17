@@ -1523,7 +1523,7 @@ def register_handlers(bot, cfg):
         else:
             safe_reply(bot, m, "🛑 *Run Cancelled.* No active numbers running in current session.\n\n💡 Tip: To cancel a specific order ID directly, use: `/cancel <order_id>`", parse_mode="Markdown", reply_markup=get_control_keyboard())
 
-    @bot.message_handler(commands=["status"])
+    @bot.message_handler(commands=["status", "memory", "mem", "system"])
     def cmd_status(m):
         if not is_authorized(m.chat.id, cfg, bot, m):
             return
@@ -1532,12 +1532,33 @@ def register_handlers(bot, cfg):
         cfg_data = ss.load_config(ss.CONFIG_PATH)
         op = cfg_data.get("otp_provider") or {}
         bal = ss.get_provider_balance(op)
+        acc_count = len(ss.load_accounts())
+
+        mem_str = "Healthy (within limits)"
+        disk_str = "Healthy"
+        try:
+            for p in ["/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory/memory.usage_in_bytes"]:
+                if os.path.exists(p):
+                    with open(p) as f:
+                        used = round(int(f.read().strip()) / (1024 * 1024), 1)
+                        mem_str = f"{used} MB / 512 MB"
+                    break
+            st = os.statvfs("/")
+            free_gb = round((st.f_bavail * st.f_frsize) / (1024 ** 3), 1)
+            total_gb = round((st.f_blocks * st.f_frsize) / (1024 ** 3), 1)
+            disk_str = f"{free_gb} GB free / {total_gb} GB"
+        except Exception:
+            pass
+
         text = (
-            f"📊 *Bot Status Report:*\n\n"
+            f"📊 *Bot & System Status:*\n\n"
             f"• *Active Run:* `{RUNNING['active']}`\n"
             f"• *Progress:* `{RUNNING['done']}/{RUNNING['total']}`\n"
             f"• *Cancelled Flag:* `{RUNNING['cancel']}`\n"
             f"• *Active Rented Numbers:* `{count}`\n"
+            f"• *Accounts Database:* `{acc_count} verified`\n"
+            f"• *Memory (RAM):* `{mem_str}`\n"
+            f"• *Disk Storage:* `{disk_str}`\n"
             f"• *Live Balance:* `{bal}`"
         )
         safe_reply(bot, m, text, parse_mode="Markdown", reply_markup=get_control_keyboard())

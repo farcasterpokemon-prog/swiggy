@@ -88,11 +88,41 @@ class WebhookServerHandler(http.server.BaseHTTPRequestHandler):
             try:
                 import swiggy_bot
                 import swiggy_signup as ss
+                mem_info = {}
+                try:
+                    for p in ["/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory/memory.usage_in_bytes"]:
+                        if os.path.exists(p):
+                            with open(p) as f:
+                                mem_info["cgroup_usage_mb"] = round(int(f.read().strip()) / (1024 * 1024), 2)
+                            break
+                    for p in ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]:
+                        if os.path.exists(p):
+                            with open(p) as f:
+                                val = f.read().strip()
+                                if val != "max":
+                                    mem_info["cgroup_limit_mb"] = round(int(val) / (1024 * 1024), 2)
+                            break
+                    if os.path.exists("/proc/meminfo"):
+                        with open("/proc/meminfo") as f:
+                            for line in f:
+                                parts = line.split(":")
+                                k = parts[0].strip()
+                                if k in ["MemTotal", "MemFree", "MemAvailable"]:
+                                    v = int(parts[1].strip().split()[0])
+                                    mem_info[k.lower() + "_mb"] = round(v / 1024, 2)
+                    st = os.statvfs("/")
+                    mem_info["disk_free_gb"] = round((st.f_bavail * st.f_frsize) / (1024 ** 3), 2)
+                    mem_info["disk_total_gb"] = round((st.f_blocks * st.f_frsize) / (1024 ** 3), 2)
+                    mem_info["accounts_stored"] = len(ss.load_accounts())
+                except Exception as ex:
+                    mem_info["error"] = str(ex)
+
                 diag = {
                     "running": swiggy_bot.RUNNING,
                     "active_orders": ss.load_active_orders(),
                     "recent_updates": RECENT_UPDATES,
                     "provider_balance": ss.get_provider_balance(),
+                    "memory_and_storage": mem_info,
                 }
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
