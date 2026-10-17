@@ -41,17 +41,18 @@ CTX.check_hostname = False
 CTX.verify_mode = ssl.CERT_NONE
 UNVERIFIED_CTX = CTX
 
-CURRENT_PROXY_SESSION_ID = None
+CURRENT_PROXY_SESSION_ID = uuid.uuid4().hex[:8]
 CURRENT_PROXY_SESSION_LOCK = threading.Lock()
 
 
-def get_proxy_url(cfg=None):
+def get_proxy_url(cfg=None, session_id=None):
     try:
         if cfg is None:
             cfg = load_config(CONFIG_PATH)
         p_cfg = cfg.get("proxy") or {}
         if p_cfg.get("enabled") and p_cfg.get("url"):
             url = p_cfg.get("url").strip()
+            active_sid = session_id or CURRENT_PROXY_SESSION_ID or uuid.uuid4().hex[:8]
             if "dataimpulse.com" in url:
                 try:
                     parts = urllib.parse.urlsplit(url)
@@ -59,23 +60,23 @@ def get_proxy_url(cfg=None):
                         user_pass, host_port = parts.netloc.split("@", 1)
                         if ":" in user_pass:
                             u, p = user_pass.split(":", 1)
+                            u = re.sub(r"[;_]+(sessid|sid|session)\.[^;:]+", "", u)
                             if "__cr." not in u:
                                 u = f"{u}__cr.in"
-                            if CURRENT_PROXY_SESSION_ID:
-                                u = re.sub(r"(__sid\.[^;:]+|;sid\.[^;:]+|__session\.[^;:]+)", "", u)
-                                u = f"{u}__sid.{CURRENT_PROXY_SESSION_ID}"
+                            if active_sid:
+                                u = f"{u};sessid.{active_sid}"
                             new_netloc = f"{u}:{p}@{host_port}"
                             url = urllib.parse.urlunsplit((parts.scheme, new_netloc, parts.path, parts.query, parts.fragment))
                 except Exception:
                     pass
-            elif CURRENT_PROXY_SESSION_ID:
+            elif active_sid:
                 try:
                     parts = urllib.parse.urlsplit(url)
                     if parts.netloc and "@" in parts.netloc:
                         user_pass, host_port = parts.netloc.split("@", 1)
                         if ":" in user_pass:
                             u, p = user_pass.split(":", 1)
-                            u = f"{u}-session-{CURRENT_PROXY_SESSION_ID}"
+                            u = f"{u}-session-{active_sid}"
                             new_netloc = f"{u}:{p}@{host_port}"
                             url = urllib.parse.urlunsplit((parts.scheme, new_netloc, parts.path, parts.query, parts.fragment))
                 except Exception:
@@ -89,7 +90,7 @@ def get_proxy_url(cfg=None):
 def get_opener(proxy_url=None):
     if proxy_url is None:
         proxy_url = get_proxy_url()
-    handlers = [urllib.request.HTTPSHandler(context=UNVERIFIED_CTX)]
+    handlers = []
     if proxy_url:
         handlers.append(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
     return urllib.request.build_opener(*handlers)
@@ -898,45 +899,20 @@ def generate_random_email(name):
 def get_signup_check_headers(device_id=None):
     dev = str(device_id or uuid.uuid4().hex[:16])
     return {
+        "host": "profile.swiggy.com",
         "pl-version": "140",
         "user-agent": "Swiggy-Android",
         "content-type": "application/json; charset=utf-8",
         "version-code": "1807",
         "app-version": "4.114.2",
-        "latitude": "0.0",
-        "longitude": "0.0",
-        "os-version": "7.1.2",
-        "accessibility_enabled": "false",
         "swuid": dev,
         "deviceid": dev,
-        "x-network-quality": "GOOD",
-        "faw-flags": "1354",
-        "accept-encoding": "gzip",
         "accept": "application/json; charset=utf-8",
     }
 
 
 CHECKER_SESSION = None
 CHECKER_SESSION_LOCK = threading.Lock()
-OTPCART_SESSION = None
-OTPCART_SESSION_LOCK = threading.Lock()
-
-
-def get_otpcart_session():
-    global OTPCART_SESSION
-    if OTPCART_SESSION is None:
-        with OTPCART_SESSION_LOCK:
-            if OTPCART_SESSION is None:
-                try:
-                    import requests
-                    s = requests.Session()
-                    adapter = requests.adapters.HTTPAdapter(pool_connections=15, pool_maxsize=30)
-                    s.mount("https://", adapter)
-                    s.mount("http://", adapter)
-                    OTPCART_SESSION = s
-                except Exception:
-                    pass
-    return OTPCART_SESSION
 
 
 def reset_checker_session():
@@ -971,10 +947,10 @@ def get_checker_session(force_new=False):
     return CHECKER_SESSION
 
 
-def detect_user(mobile, session=None):
+def detect_user(mobile, session=None, session_id=None):
     """
     Check if a Swiggy mobile number is new or existing directly via Swiggy API.
-    Uses official Swiggy-Android headers with Indian residential proxy via persistent pooled session.
+    Uses official Swiggy-Android headers with Indian residential proxy via dynamic session.
     """
     clean = re.sub(r"\D", "", str(mobile).strip())
     if len(clean) > 10 and clean.startswith("91"):
@@ -991,30 +967,14 @@ def detect_user(mobile, session=None):
     headers = get_signup_check_headers(device_id)
     payload = {"email": email, "mobile": clean, "name": name}
     url = "https://profile.swiggy.com/api/v2/app/signup"
+    data_bytes = json.dumps(payload).encode("utf-8")
 
-    sess = session or get_checker_session()
-    if sess is not None:
-        try:
-            r = sess.post(url, json=payload, headers=headers, timeout=8.5)
-            data = r.json()
-            msg = (data.get("statusMessage") or "").lower()
-            code = data.get("statusCode")
-            if code == 3 or "already exist" in msg or "already registered" in msg:
-                return "existing", data
-            if code == 0 and ("done successfully" in msg or code == 0):
-                return "new", data
-            return "unknown", data
-        except Exception:
-            # Reset session on network timeout or connection reset so stale pool isn't reused
-            reset_checker_session()
-
-    # Proxy Urllib fallback (never call unproxied from datacenter)
-    proxy_url = get_proxy_url()
+    check_sid = session_id or uuid.uuid4().hex[:8]
+    proxy_url = get_proxy_url(session_id=check_sid)
     if proxy_url:
         try:
-            data_bytes = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
             opener = get_opener(proxy_url)
+            req = urllib.request.Request(url, data=data_bytes, headers=headers, method="POST")
             with opener.open(req, timeout=8.5) as r:
                 raw = r.read()
                 if r.headers.get("Content-Encoding") == "gzip":
@@ -1050,49 +1010,11 @@ def detect_user(mobile, session=None):
     return "unknown", {"error": "no_proxy"}
 
 
-def check_external_api(clean, timeout=6.0, retries=2):
-    """High-speed backup registration checker via Otpcart with persistent pooled requests."""
-    url = "https://checker.otpcart.xyz/api/check-swiggy"
-    payload = {"mobile": clean, "phone": clean}
-    sess = get_otpcart_session()
-
-    for attempt in range(retries):
-        if sess is not None:
-            try:
-                r = sess.post(url, json=payload, timeout=timeout)
-                if r.status_code == 200:
-                    data = r.json()
-                    st = str(data.get("status", "")).lower().strip()
-                    if st == "registered":
-                        return True, {"status": "registered", "mobile": clean, "raw": data, "engine": "otpcart"}
-                    elif st == "not_registered":
-                        return False, {"status": "not_registered", "mobile": clean, "raw": data, "engine": "otpcart"}
-            except Exception:
-                pass
-
-        try:
-            data_bytes = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(url, data=data_bytes, headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}, method="POST")
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                data = json.loads(r.read().decode("utf-8", "replace"))
-                st = str(data.get("status", "")).lower().strip()
-                if st == "registered":
-                    return True, {"status": "registered", "mobile": clean, "raw": data, "engine": "otpcart"}
-                elif st == "not_registered":
-                    return False, {"status": "not_registered", "mobile": clean, "raw": data, "engine": "otpcart"}
-        except Exception:
-            pass
-        if attempt < retries - 1:
-            time.sleep(0.4)
-    return None
-
-
 def check_swiggy_registered(mobile, cfg=None):
     """
-    High-Speed Dual-Engine Swiggy Registration Checker with Automatic Failover:
-    1. Primary Engine: Native Swiggy via persistent pooled session & Indian residential proxy (100% authoritative).
-    2. Secondary Failover: Otpcart high-speed rotating checker backup (~0.8s avg).
-    3. Self-Healing: Recovers from transient proxy stalls and avoids returning 'unknown'.
+    High-Speed Self-Healing Swiggy Registration Checker:
+    1. Primary Check: Direct Swiggy profile signup probe via dedicated fresh residential session.
+    2. Auto-Healing: If transient rate-limit (HTTP 403 / unknown) occurs, instantly retries on another fresh session.
     """
     clean = re.sub(r"\D", "", str(mobile).strip())
     if len(clean) > 10 and clean.startswith("91"):
@@ -1102,27 +1024,23 @@ def check_swiggy_registered(mobile, cfg=None):
     elif len(clean) > 10:
         clean = clean[-10:]
 
-    # Engine 1: Native Swiggy via persistent pooled Indian proxy session
-    status, data = detect_user(clean)
+    # Primary check with isolated session ID
+    sid1 = uuid.uuid4().hex[:8]
+    status, data = detect_user(clean, session_id=sid1)
     if status == "existing":
         return True, {"status": "registered", "mobile": clean, "raw": data, "engine": "native"}
     elif status == "new":
         return False, {"status": "not_registered", "mobile": clean, "raw": data, "engine": "native"}
 
-    # Engine 2: Otpcart high-speed backup rotating checker
-    ext_res = check_external_api(clean, timeout=6.0, retries=2)
-    if ext_res is not None:
-        return ext_res
-
-    # Engine 1 Retry: Re-attempt Native after resetting session
-    reset_checker_session()
-    status2, data2 = detect_user(clean)
+    # Auto-healing retry with fresh session ID
+    sid2 = uuid.uuid4().hex[:8]
+    status2, data2 = detect_user(clean, session_id=sid2)
     if status2 == "existing":
         return True, {"status": "registered", "mobile": clean, "raw": data2, "engine": "native_retry"}
     elif status2 == "new":
         return False, {"status": "not_registered", "mobile": clean, "raw": data2, "engine": "native_retry"}
 
-    return False, {"status": "unknown", "mobile": clean, "raw": data or data2}
+    return False, {"status": "unknown", "mobile": clean, "raw": data2 or data}
 
 
 def make_provider(op):
