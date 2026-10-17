@@ -1,4 +1,4 @@
-﻿name: 24/7 Render Keep Alive
+name: 24/7 Render Keep Alive
 
 on:
   schedule:
@@ -12,4 +12,4 @@ jobs:
       - name: Ping Swiggy Telegram Bot on Render
         run: |
           echo "Pinging Swiggy Bot on Render to keep it awake 24/7..."
-          curl -s -f "https://swiggy-telegram-bot.onrender.com" || true
+          curl -s -f "https://swiggy-telegram-bot-9bya.onrender.com" || true
