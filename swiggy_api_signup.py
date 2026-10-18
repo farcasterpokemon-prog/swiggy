@@ -78,16 +78,16 @@ def record_paid_success(phone=""):
 
 def record_paid_failure(phone, reason, cfg=None):
     global CONSECUTIVE_PAID_FAILURES, CIRCUIT_BREAKER_TRIGGERED
-    threshold = 4
+    threshold = 1
     if cfg and isinstance(cfg, dict):
-        threshold = int((cfg.get("signup") or {}).get("max_consecutive_paid_failures", 4))
+        threshold = int((cfg.get("signup") or {}).get("max_consecutive_paid_failures", 1))
     with PAID_FAILURES_LOCK:
         CONSECUTIVE_PAID_FAILURES += 1
         curr = CONSECUTIVE_PAID_FAILURES
         slog(f"⚠️ [CIRCUIT BREAKER] Paid OTP failure #{curr}/{threshold} on {phone}: {reason}")
         if curr >= threshold:
             CIRCUIT_BREAKER_TRIGGERED = True
-            slog(f"🚨 [CIRCUIT BREAKER TRIGGERED] {curr} consecutive accounts failed after paid OTP ($0.{curr * 10:02d} deducted). Stopping run immediately to protect balance!")
+            slog(f"🚨 [CIRCUIT BREAKER TRIGGERED] {curr} consecutive account(s) failed after paid OTP ($0.{curr * 10:02d} deducted). Stopping run immediately to protect balance!")
             ss.trigger_cancel()
             return True
         return False
