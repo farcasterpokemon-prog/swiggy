@@ -23,7 +23,7 @@
     "rotate_identity": true,
     "rotate_via": "qute",
     "rotate_gsf": true,
-    "max_consecutive_paid_failures": 4
+    "max_consecutive_paid_failures": 1
   },
   "otp_provider": {
     "enabled": true,
