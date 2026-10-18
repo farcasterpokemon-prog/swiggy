@@ -632,7 +632,7 @@ def create_accounts(chat_id, count, bot):
         if cb_triggered:
             cb_alert = (
                 f"🚨 *SAFETY SHIELD TRIGGERED (RUN AUTO-STOPPED)*\n\n"
-                f"• *Reason:* `{cb_fails}` consecutive accounts failed after paid OTP delivery.\n"
+                f"• *Reason:* `{cb_fails}` consecutive account(s) failed after paid OTP delivery.\n"
                 f"• *Protection:* All workers stopped immediately & pending rentals refunded to protect your balance.\n"
                 f"• *Accounts Saved Before Stop:* `{len(newly_created_accounts)}`"
             )
